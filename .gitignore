@@ -28,3 +28,6 @@ replays/
 .env
 .venv/
 __pycache__/
+
+# WorkBuddy 本地记忆/会话数据（含私有笔记，不入公开仓库）
+.workbuddy/
