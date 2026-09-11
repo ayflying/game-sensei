@@ -111,6 +111,7 @@ func main() {
 	// ---- PC 实测体验：日志浮窗 + 退出最小化游戏 ----
 	overlayOn := flag.Bool("overlay", true, "PC 模式在屏幕右下角显示置顶日志浮窗（对截屏不可见，不污染感知）")
 	minimizeOnExit := flag.Bool("minimize-on-exit", true, "运行结束时把标题含游戏名的窗口最小化，方便看终端输出")
+	focusOnStart := flag.Bool("focus-on-start", true, "PC 模式启动时把标题含游戏名的窗口还原并切到前台（否则抓屏/按键会落到别的窗口）")
 	flag.Parse()
 
 	// 用户未显式指定帧率时，按平台给不同默认值：ADB 截图单帧约 200~400ms，
@@ -205,6 +206,25 @@ func main() {
 		}
 	}()
 	fmt.Printf("控制目标: %s\n", be.Describe())
+
+	// PC 模式：游戏窗口必须在**前台且非最小化**，抓屏才拿得到画面、
+	// 按键才会进到游戏里（后台窗口收不到键盘焦点）。跑过一次退出会
+	// 把游戏最小化，下次启动如果不还原，Agent 就在对着桌面盲操作。
+	if *focusOnStart && cfg.Target != "android" {
+		if kw := gameKeyword(cfg, prof); kw != "" {
+			gamewin.EnsureDPIAware()
+			if n, err := gamewin.FocusByTitle(kw); err != nil {
+				fmt.Printf("⚠️  置顶游戏窗口失败（关键词 %q）: %v\n", kw, err)
+				logHook("置顶失败: " + err.Error())
+			} else if n > 0 {
+				fmt.Printf("已把 %d 个游戏窗口还原并切到前台（关键词 %q）\n", n, kw)
+				logHook(fmt.Sprintf("已置顶游戏窗口（%q）", kw))
+			} else {
+				fmt.Printf("未找到标题含 %q 的窗口——游戏可能还没启动\n", kw)
+				logHook("没找到游戏窗口，等待启动…")
+			}
+		}
+	}
 
 	scrW, scrH, err := be.Size()
 	if err != nil {

@@ -318,9 +318,20 @@ go run ./cmd/helper -target android -app com.tencent.nrc -launch -dry-run -teach
 | `-game` | 游戏档案（档案名或 JSON 路径），决定动作怎么落到设备上，见 §9.5 |
 | `-overlay` | PC 模式默认开：屏幕右下角置顶日志浮窗（见下） |
 | `-minimize-on-exit` | PC 模式默认开：运行结束时把游戏窗口最小化（见下） |
+| `-focus-on-start` | PC 模式默认开：启动时把游戏窗口还原并切到前台（见下） |
 
 **PC 实测体验（`internal/overlay` + `internal/gamewin`，Windows only，均默认开启）：**
 
+- **启动置顶（`-focus-on-start`）**：PC 实时控制的前提是游戏窗口**在前台且未最小化**——
+  最小化的窗口 GDI 抓不到内容（截出来是桌面），后台窗口收不到键盘焦点（`SendInput`
+  的按键会落到别的程序上）。第一版只有"退出最小化"没有"启动还原"，于是第二次跑
+  Agent 就在对着桌面盲操作（实测：游戏明明在主屏，抓屏却只看到桌面）。现在启动时按
+  档案名还原并置顶，与退出最小化配成一对。置顶绕开了 Windows 的**前台锁**：
+  ① 先 `keybd_event` 补一次 Alt 按下+抬起，让系统认为"用户刚按过键"；
+  ② 再 `AttachThreadInput` 把自身消息队列接到当前前台线程上借其前台权
+  （`AttachThreadInput` 在 **user32.dll**，不在 kernel32——第一版挂错 DLL 直接 panic）。
+  只作用于可见/最小化的窗口：同款游戏常有多个同名顶层窗（启动器、反作弊壳、隐藏消息窗），
+  对隐藏窗口置顶无意义还可能抢到空壳上。
 - **日志浮窗**：屏幕右下角一块置顶半透明黑框，实时滚动最近的运行日志（每步动作、
   执行结果、警告）。四个关键性质：
   1. **游戏全屏也可见**——`WS_EX_TOPMOST` + 每 2 秒重新钉顶（防全屏切换后掉下去）；
@@ -335,6 +346,13 @@ go run ./cmd/helper -target android -app com.tencent.nrc -launch -dry-run -teach
   `ShowWindowAsync(SW_MINIMIZE)` 最小化游戏，让用户立刻看到终端里的评估/对话输出。
   `ShowWindowAsync` 而非 `ShowWindow`：不等待游戏主循环响应，不卡退出流程。
 - 浮窗可视化自测工具：`go run ./cmd/overlay-test -seconds 15`（打印示例日志 15 秒）。
+- **窗口探照灯 `cmd/win`**：跑 Agent 前先看清"Agent 眼中的窗口是什么状态"。
+  `go run ./cmd/win list [关键词]` 列出顶层窗口（含 hwnd/pid/可见性/最小化/矩形/标题），
+  `go run ./cmd/win focus <关键词>` 手动还原+置顶，
+  `go run ./cmd/win shot out.png` 用**与实时回路同一条 GDI 抓屏链路**存一张图——
+  用它确认感知画面正常再起 LIVE，别对着桌面盲操作。
+  注意 `list` 会先 `SetProcessDPIAware`：缩放 125%/150% 的屏上不调它，
+  `GetWindowRect` 与抓到的图都是被虚拟化的"逻辑像素"，坐标会算错。
 
 ### 9.4 Phase 2：老师在线示范（-demo）
 
