@@ -35,7 +35,8 @@ const maxFailStreak = 5
 // 节拍由老师推理速度决定（实测 qwen3.5:9b 关思考后约 1.2s/步），
 // 动作之间再留 DemoWait 让游戏把状态变完——否则下一帧拍的还是旧画面，
 // 老师会基于「没变的画面」重复下同一个动作。
-func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-chan os.Signal) error {
+func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-chan os.Signal,
+	logHook func(string)) error {
 	sw, sh, err := be.Size()
 	if err != nil {
 		return fmt.Errorf("获取屏幕尺寸失败: %w", err)
@@ -124,9 +125,11 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-ch
 
 		if actErr != nil {
 			fmt.Printf("[%s] ⚠️  老师无响应: %v\n", progress(step, steps), actErr)
+			logHook(fmt.Sprintf("⚠️ 老师无响应: %v", actErr))
 		} else if !res.Used {
 			fmt.Printf("[%s] ⚠️  动作解析失败（%.1fs）| 原始输出: %s\n",
 				progress(step, steps), info.LatencyMs/1000, oneLine(res.Raw, 80))
+			logHook(fmt.Sprintf("⚠️ 动作解析失败: %s", oneLine(res.Raw, 60)))
 		} else {
 			parsedOK++
 			// 4) 展开 + 执行。
@@ -143,12 +146,14 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-ch
 				// 展开失败通常是配置问题：档案里没有这个按钮、斜向没配键位。
 				failStreak++
 				fmt.Printf("[%s] ⚠️  动作无法执行: %v\n", progress(step, steps), expErr)
+				logHook(fmt.Sprintf("⚠️ 动作无法执行: %v", expErr))
 				if failStreak >= maxFailStreak {
 					return fmt.Errorf("连续 %d 步动作无法执行，最后错误: %w", failStreak, expErr)
 				}
 			} else if err := be.Apply(act); err != nil {
 				failStreak++
 				fmt.Printf("[%s] ⚠️  执行失败: %v\n", progress(step, steps), err)
+				logHook(fmt.Sprintf("⚠️ 执行失败: %v", err))
 				if failStreak >= maxFailStreak {
 					return fmt.Errorf("连续 %d 步执行失败，最后错误: %w", failStreak, err)
 				}
@@ -164,9 +169,11 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-ch
 					repeat = " ⚠️与上一步相同"
 				}
 				// L1 → L2 都打出来：左边是模型的意图，右边是最终落到设备上的操作
-				fmt.Printf("[%s] %s %-20s → %-28s | %s | %.1fs %dtok%s\n",
+				line := fmt.Sprintf("[%s] %s %-20s → %-28s | %s | %.1fs %dtok%s",
 					progress(step, steps), mark, act.String(), expanded.String(),
 					agent.ExplainAction(act), info.LatencyMs/1000, info.OutTokens, repeat)
+				fmt.Println(line)
+				logHook(line)
 			}
 		}
 

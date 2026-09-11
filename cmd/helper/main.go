@@ -45,7 +45,9 @@ import (
 	"github.com/ayflying/game-sensei/internal/agent"
 	"github.com/ayflying/game-sensei/internal/config"
 	"github.com/ayflying/game-sensei/internal/game"
+	"github.com/ayflying/game-sensei/internal/gamewin"
 	"github.com/ayflying/game-sensei/internal/memory"
+	"github.com/ayflying/game-sensei/internal/overlay"
 	"github.com/ayflying/game-sensei/internal/teacher"
 )
 
@@ -106,6 +108,9 @@ func main() {
 	launchApp := flag.Bool("launch", false, "android 模式下先启动 -app 指定的应用")
 	flag.StringVar(&cfg.Game, "game", cfg.Game,
 		"游戏档案：档案名（如 nrc、pc_generic）或 JSON 路径；空=不带游戏知识")
+	// ---- PC 实测体验：日志浮窗 + 退出最小化游戏 ----
+	overlayOn := flag.Bool("overlay", true, "PC 模式在屏幕右下角显示置顶日志浮窗（对截屏不可见，不污染感知）")
+	minimizeOnExit := flag.Bool("minimize-on-exit", true, "运行结束时把标题含游戏名的窗口最小化，方便看终端输出")
 	flag.Parse()
 
 	// 用户未显式指定帧率时，按平台给不同默认值：ADB 截图单帧约 200~400ms，
@@ -138,6 +143,28 @@ func main() {
 	}
 	fmt.Printf("game-sensei | 模式=%s | 目标=%dFPS | 降采样宽=%dpx\n", mode, cfg.TargetFPS, cfg.DownsampleWidth)
 
+	// 日志浮窗：右下角置顶小窗，人眼可见、截屏拍不到（WDA_EXCLUDEFROMCAPTURE），
+	// 游戏全屏时也能看到 agent 在干什么，且不污染老师/学生的感知画面。
+	var ov *overlay.Window
+	if *overlayOn && cfg.Target != "android" {
+		o, err := overlay.Start(overlay.Options{MaxLines: 6, WidthPx: 620, FontSize: 15})
+		if err != nil {
+			fmt.Printf("⚠️  日志浮窗启动失败（不影响主流程）: %v\n", err)
+		} else {
+			ov = o
+			defer o.Close()
+			o.Push("game-sensei 日志浮窗已启动")
+			fmt.Println("日志浮窗: 屏幕右下角（对截屏不可见）")
+		}
+	}
+	// logHook：把 fmt.Printf 的关键输出同步喂给浮窗。
+	// 不劫持全局 stdout——实时回路的每一帧统计太吵，浮窗只收大事。
+	logHook := func(line string) {
+		if ov != nil {
+			ov.Push(time.Now().Format("15:04:05 ") + line)
+		}
+	}
+
 	// 游戏档案：把「语义动作」（朝前走 / 按跳跃）翻译成「这台设备上的具体操作」
 	// （把虚拟摇杆推到哪里 / 按哪个键）。换游戏只需换一份档案。
 	var prof *game.Profile
@@ -164,6 +191,19 @@ func main() {
 	// 退出时释放后端资源：PC 端会把仍按住的键抬起来，
 	// 否则「按住移动」的最后一步会让键盘卡在按下状态。
 	defer func() { _ = be.Close() }()
+	// 运行结束把游戏窗口最小化：让用户立刻看到终端里的对话/评估输出。
+	defer func() {
+		if !*minimizeOnExit {
+			return
+		}
+		kw := gameKeyword(cfg, prof)
+		if kw == "" {
+			return
+		}
+		if n, err := gamewin.MinimizeByTitle(kw); err == nil && n > 0 {
+			logHook(fmt.Sprintf("已最小化 %d 个游戏窗口（关键词 %q）", n, kw))
+		}
+	}()
 	fmt.Printf("控制目标: %s\n", be.Describe())
 
 	scrW, scrH, err := be.Size()
@@ -236,6 +276,7 @@ func main() {
 			cfg.TeacherModel, cfg.TeacherURL, ver)
 		if cfg.Goal != "" {
 			fmt.Printf("目标: %s\n", cfg.Goal)
+			logHook("目标: " + cfg.Goal)
 		}
 		for _, h := range hints {
 			fmt.Printf("先验: %s\n", h)
@@ -246,7 +287,8 @@ func main() {
 
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-		if err := runDemo(cfg, be, dem, stop); err != nil {
+		logHook("示范模式启动（" + mode + "）")
+		if err := runDemo(cfg, be, dem, stop, logHook); err != nil {
 			log.Fatalf("示范回路异常: %v", err)
 		}
 		return
@@ -494,6 +536,18 @@ func reporter(frameCh <-chan memory.Record, traj *memory.Buffer, cfg config.Conf
 
 func ms(a, b time.Time) float64 {
 	return float64(b.Sub(a).Microseconds()) / 1000.0
+}
+
+// gameKeyword 返回用于窗口匹配的游戏关键词：优先档案名，
+// 其次包名段。找不到就返回空（不做最小化）。
+func gameKeyword(cfg config.Config, prof *game.Profile) string {
+	if prof != nil && prof.Name != "" {
+		return prof.Name
+	}
+	if cfg.Game != "" {
+		return cfg.Game
+	}
+	return ""
 }
 
 func meanGray(img *image.Gray) uint8 {

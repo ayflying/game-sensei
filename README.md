@@ -96,6 +96,8 @@ game-sensei/
 │   ├── vision/               # 区域平均降采样 + JPEG 编码（老师判读用）
 │   ├── dataset/              # 示范数据集落盘（meta.json / trajectory.jsonl / frames）
 │   ├── video/                # 教学视频：ffmpeg 抽帧 / dHash 去重 / 动作段切分 / 判读
+│   ├── overlay/              # PC 右下角置顶日志浮窗（截屏不可见，见 §9.3）
+│   ├── gamewin/              # 按标题找游戏窗口并最小化（运行结束让出屏幕）
 │   ├── teacher/              # Ollama 客户端 + 轨迹评估器 + 动作示范器（Phase 1/2）
 │   ├── memory/               # 轨迹缓冲
 │   └── config/               # 帧率/降采样/动作集/目标平台/游戏档案（按游戏可配）
@@ -314,6 +316,25 @@ go run ./cmd/helper -target android -app com.tencent.nrc -launch -dry-run -teach
 | `-app` | 安卓包名（如 `com.tencent.nrc`），仅安卓后端用；`-game` 的档案带包名时可省 |
 | `-launch` | 启动 `-app` 指定的应用并等待其进入前台 |
 | `-game` | 游戏档案（档案名或 JSON 路径），决定动作怎么落到设备上，见 §9.5 |
+| `-overlay` | PC 模式默认开：屏幕右下角置顶日志浮窗（见下） |
+| `-minimize-on-exit` | PC 模式默认开：运行结束时把游戏窗口最小化（见下） |
+
+**PC 实测体验（`internal/overlay` + `internal/gamewin`，Windows only，均默认开启）：**
+
+- **日志浮窗**：屏幕右下角一块置顶半透明黑框，实时滚动最近的运行日志（每步动作、
+  执行结果、警告）。四个关键性质：
+  1. **游戏全屏也可见**——`WS_EX_TOPMOST` + 每 2 秒重新钉顶（防全屏切换后掉下去）；
+  2. **对屏幕抓取不可见**——`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`
+     （Win10 2004+），人眼看得见、GDI/DXGI 截屏拍不到，**不会污染老师/学生的感知画面**
+     （这条是实测逼出来的：第一版浮窗被 gdigrab 拍进去，直接在截屏里留了一块日志）；
+  3. **不抢焦点不抢键盘**——`WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`；
+  4. 关闭用 `PostThreadMessageW(WM_QUIT)` 向消息泵线程投递——
+     **`PostQuitMessage` 只对调用线程生效**，第一版从主线程调它导致消息泵永远阻塞、
+     进程退出不去（已修复并实测进程自动退出）。
+- **退出最小化**：程序结束时按游戏档案名（如「洛克王国：世界」）枚举顶层窗口，
+  `ShowWindowAsync(SW_MINIMIZE)` 最小化游戏，让用户立刻看到终端里的评估/对话输出。
+  `ShowWindowAsync` 而非 `ShowWindow`：不等待游戏主循环响应，不卡退出流程。
+- 浮窗可视化自测工具：`go run ./cmd/overlay-test -seconds 15`（打印示例日志 15 秒）。
 
 ### 9.4 Phase 2：老师在线示范（-demo）
 
