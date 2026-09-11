@@ -189,6 +189,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("后端初始化失败: %v", err)
 	}
+	// 抓屏时隐藏浮窗：WDA_EXCLUDEFROMCAPTURE 对 GDI BitBlt 是「变黑」不是「消失」，
+	// 不隐藏的话老师/学生的每帧画面里都有一块黑矩形（感知污染）。
+	if pcb, ok := be.(*pcBackend); ok && ov != nil {
+		pcb.beforeShot = ov.Hide
+		pcb.afterShot = ov.Show
+	}
 	// 退出时释放后端资源：PC 端会把仍按住的键抬起来，
 	// 否则「按住移动」的最后一步会让键盘卡在按下状态。
 	defer func() { _ = be.Close() }()

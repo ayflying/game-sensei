@@ -10,6 +10,7 @@ package agent
 import (
 	"fmt"
 	"image"
+	"strings"
 	"time"
 )
 
@@ -62,6 +63,11 @@ type Action struct {
 
 	Code string // ActionKey 时的键名：w/a/s/d（PC）或 back/home（Android）
 
+	// Codes 是 ActionKey 的多键形式：PC 键盘游戏里「斜向移动」需要同时按两个键
+	// （右下 = S+D），单个 Code 表达不了。非空时后端把每个键都按住同样时长；
+	// Code 留空。单键仍用 Code，保持既有档案与日志的读法不变。
+	Codes []string
+
 	Dx int // ActionMouseMove 时的相对位移
 	Dy int
 
@@ -74,6 +80,12 @@ type Action struct {
 func (a Action) String() string {
 	switch a.Kind {
 	case ActionKey:
+		if len(a.Codes) > 0 {
+			if a.Dur > 0 {
+				return fmt.Sprintf("keys:%s/%dms", strings.Join(a.Codes, "+"), a.Dur.Milliseconds())
+			}
+			return "keys:" + strings.Join(a.Codes, "+")
+		}
 		if a.Dur > 0 {
 			return fmt.Sprintf("key:%s/%dms", a.Code, a.Dur.Milliseconds())
 		}

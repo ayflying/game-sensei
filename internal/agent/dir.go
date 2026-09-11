@@ -120,6 +120,15 @@ func (d Dir) IsValid() bool {
 	return false
 }
 
+// IsDiagonal 报告是否为斜向（PC 键盘上斜向要同时按两个键）。
+func (d Dir) IsDiagonal() bool {
+	switch d {
+	case DirUpLeft, DirUpRight, DirDownLeft, DirDownRight:
+		return true
+	}
+	return false
+}
+
 // invSqrt2 = 1/√2，斜向分量。用同一个值保证八个方向推杆幅度一致——
 // 否则斜向会比正向多推 41%，游戏里的移动速度就不一致了。
 const invSqrt2 = math.Sqrt2 / 2

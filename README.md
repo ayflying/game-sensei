@@ -91,13 +91,13 @@ game-sensei/
 │   ├── game/                 # 游戏档案：换游戏只换一份 JSON（见 §9.5）
 │   │   ├── profile.go        # 档案结构 / 加载 / 校验 / 按钮查找
 │   │   ├── resolve.go        # L1 → L2 展开（MOVE→摇杆/按键，PRESS→点击）
-│   │   └── profiles/*.json   # 内置档案：nrc / mobile_generic / pc_generic
+│   │   └── profiles/*.json   # 内置档案：nrc(手游) / nrc_pc(键鼠) / mobile_generic / pc_generic
 │   ├── input/                # 键鼠（SendInput + SetCursorPos + mouse_event，纯 syscall）
 │   ├── vision/               # 区域平均降采样 + JPEG 编码（老师判读用）
 │   ├── dataset/              # 示范数据集落盘（meta.json / trajectory.jsonl / frames）
 │   ├── video/                # 教学视频：ffmpeg 抽帧 / dHash 去重 / 动作段切分 / 判读
 │   ├── overlay/              # PC 右下角置顶日志浮窗（截屏不可见，见 §9.3）
-│   ├── gamewin/              # 按标题找游戏窗口并最小化（运行结束让出屏幕）
+│   ├── gamewin/              # 游戏窗口控制：查询/还原/置顶/最小化/前台检查
 │   ├── teacher/              # Ollama 客户端 + 轨迹评估器 + 动作示范器（Phase 1/2）
 │   ├── memory/               # 轨迹缓冲
 │   └── config/               # 帧率/降采样/动作集/目标平台/游戏档案（按游戏可配）
@@ -320,6 +320,50 @@ go run ./cmd/helper -target android -app com.tencent.nrc -launch -dry-run -teach
 | `-minimize-on-exit` | PC 模式默认开：运行结束时把游戏窗口最小化（见下） |
 | `-focus-on-start` | PC 模式默认开：启动时把游戏窗口还原并切到前台（见下） |
 
+### 9.3.1 PC 档案：洛克王国：世界（nrc_pc）
+
+`internal/game/profiles/nrc_pc.json`——PC 键鼠版的洛克王国档案，与手游版 `nrc` 的差异：
+
+- **移动走键盘**：`move.mode = keys`（WASD）；斜向由框架自动组合双键
+  （右下 = 同时按住 S+D），`MOVE dir=down_right` 展开为 `keys:s+d/500ms`，实测解析正确。
+- **按钮是键盘键不是坐标**：`Button` 新增 `key` 字段，PRESS 落成按键而非点击。
+  键位来自游戏内标注与官方键位表（F 交互 / E 精灵球 / Q 星星魔法 / 空格跳跃·投球 /
+  R 坐骑飞翔 / C 下降 / Shift 冲刺 / M 地图 / ESC 菜单 / X 取消 / F4 任务 / F5 精灵）。
+- 档案 `name` 保持「洛克王国：世界」与窗口标题一致——`-focus-on-start` /
+  `-minimize-on-exit` 靠它匹配窗口。
+- 用法：`go run ./cmd/helper -game nrc_pc -live -demo`。
+
+### 9.3.2 ⚠️ 实测结论：PC 版注入输入被游戏反作弊拦截（2026-09-12）
+
+**PC 版洛克王国：世界（腾讯）对一切用户态模拟输入免疫**，完整的实验证据链：
+
+| 实验 | 结果 |
+|---|---|
+| `GetForegroundWindow` | ✓ 游戏就在前台 |
+| 进程完整性级别 | 双方都是 elevated（管理员），UIPI 排除 |
+| `SendInput` 注入 W（带扫描码）| `GetAsyncKeyState(W)=true`——注入进了系统输入流，**角色不动** |
+| `PostMessage` / `SendMessage` `WM_KEYDOWN` | 角色不动 |
+| 鼠标 `SendInput` 拖动转视角 | 视角不动（同时段任务距离 7米→10米，游戏本身活着）|
+
+结论：游戏反作弊（腾讯 ACE 类内核驱动）在输入到达游戏前丢弃了带 `LLKHF_INJECTED`
+标志的键盘/鼠标事件，且窗口消息路径也被过滤。**修扫描码仍要保留**——那是 UE4/
+DirectInput 类游戏的标准要求（见 §9.3.3），但对这个游戏不够。
+
+可行的后续路线（按侵入度排序）：
+
+1. **安卓版 + ADB 后端**（推荐，零额外成本）：`adb shell input` 在系统框架层注入，
+   游戏进程侧无法区分，一般不受游戏反作弊影响；`nrc` 档案与安卓后端均已就绪。
+2. **驱动级注入**：Interception 等过滤驱动——需要装驱动，复杂度与签名成本高。
+3. **硬件级**：Arduino/CH552 模拟 USB HID 键盘——最接近真人输入，但要硬件。
+
+### 9.3.3 注入必须带扫描码（SendInput 的坑）
+
+`keyDown/keyUp` 现在带 `KEYEVENTF_SCANCODE` + `MapVirtualKeyW` 换算的扫描码：
+只给 VK 的注入事件，系统消息循环（WM_KEYDOWN）认，但 UE4/DirectInput/Raw Input
+这类**按扫描码轮询键盘的引擎直接忽略**。Vk 字段保留，两类消费者各取所需。
+（用 `go run ./cmd/win press w 1000` 可随时自测注入链路。）
+
+
 **PC 实测体验（`internal/overlay` + `internal/gamewin`，Windows only，均默认开启）：**
 
 - **启动置顶（`-focus-on-start`）**：PC 实时控制的前提是游戏窗口**在前台且未最小化**——
@@ -333,15 +377,26 @@ go run ./cmd/helper -target android -app com.tencent.nrc -launch -dry-run -teach
   只作用于可见/最小化的窗口：同款游戏常有多个同名顶层窗（启动器、反作弊壳、隐藏消息窗），
   对隐藏窗口置顶无意义还可能抢到空壳上。
 - **日志浮窗**：屏幕右下角一块置顶半透明黑框，实时滚动最近的运行日志（每步动作、
-  执行结果、警告）。四个关键性质：
+  执行结果、警告）。关键性质与踩过的坑：
   1. **游戏全屏也可见**——`WS_EX_TOPMOST` + 每 2 秒重新钉顶（防全屏切换后掉下去）；
-  2. **对屏幕抓取不可见**——`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`
-     （Win10 2004+），人眼看得见、GDI/DXGI 截屏拍不到，**不会污染老师/学生的感知画面**
-     （这条是实测逼出来的：第一版浮窗被 gdigrab 拍进去，直接在截屏里留了一块日志）；
+  2. **抓屏时临时隐藏**——`WDA_EXCLUDEFROMCAPTURE` 对 Windows.Graphics.Capture 是
+     「窗口消失」，但对 **GDI BitBlt 是「该区域变黑」**：实测截屏里留一块纯黑矩形，
+     老师 VLM 每帧都看得到，感知照样被污染。所以 `pcBackend` 每次抓屏前 `Hide()`、
+     抓完立刻 `Show()`，截屏完全干净（demo/教学秒级抓屏频率下人眼无感）；
   3. **不抢焦点不抢键盘**——`WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`；
-  4. 关闭用 `PostThreadMessageW(WM_QUIT)` 向消息泵线程投递——
+  4. **渲染三坑**（2026-09-12 实拍「左上角黑块」的完整归因）：
+     a. `UpdateLayeredWindow` 的 `pptDst` 参数传 `(0,0)` 不是「忽略位置」而是
+        **把窗口移到 (0,0)**——浮窗跑到了左上角。必须传 NULL；
+     b. `CreateFontW` 的返回值必须接住再 `SelectObject`——没接住选进去的是 NULL
+        字体，浮窗只剩黑底没有字；
+     c. **GDI（DrawTextW）不写 alpha 字节**：只改 RGB，alpha 保持底色值。
+        半透明要靠 ULW 的整窗 `SrcConstantAlpha`（170≈67%），DIB 本身保持不透明，
+        别指望逐像素 alpha。
+  5. 关闭用 `PostThreadMessageW(WM_QUIT)` 向消息泵线程投递——
      **`PostQuitMessage` 只对调用线程生效**，第一版从主线程调它导致消息泵永远阻塞、
      进程退出不去（已修复并实测进程自动退出）。
+     ⚠️ 若进程异常被杀，浮窗窗体不会自己消失（僵尸浮窗会一直糊在屏幕上并污染
+     抓屏）——`tasklist` 找残留 `helper.exe` 杀掉即可，`go run ./cmd/win list` 能看到它。
 - **退出最小化**：程序结束时按游戏档案名（如「洛克王国：世界」）枚举顶层窗口，
   `ShowWindowAsync(SW_MINIMIZE)` 最小化游戏，让用户立刻看到终端里的评估/对话输出。
   `ShowWindowAsync` 而非 `ShowWindow`：不等待游戏主循环响应，不卡退出流程。

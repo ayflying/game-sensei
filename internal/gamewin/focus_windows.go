@@ -196,3 +196,14 @@ func focusWindow(hwnd uintptr) bool {
 	now, _, _ := procGetForegroundWindow.Call()
 	return now == hwnd
 }
+
+// ForegroundTitle 返回当前前台窗口的标题（调试用：确认按键会落到哪个窗口）。
+func ForegroundTitle() string {
+	h, _, _ := procGetForegroundWindow.Call()
+	if h == 0 {
+		return ""
+	}
+	buf := make([]uint16, 512)
+	n, _, _ := procGetWindowTextW.Call(h, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return syscall.UTF16ToString(buf[:n])
+}

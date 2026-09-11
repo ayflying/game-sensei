@@ -33,6 +33,7 @@ var (
 	procUpdateLayeredWindow = user32.NewProc("UpdateLayeredWindow")
 	procGetSystemMetrics    = user32.NewProc("GetSystemMetrics")
 	procSetWindowPos        = user32.NewProc("SetWindowPos")
+	procShowWindow          = user32.NewProc("ShowWindow")
 	procDeleteObject        = gdi32.NewProc("DeleteObject")
 	procCreateCompatibleDC  = gdi32.NewProc("CreateCompatibleDC")
 	procCreateDIBSection    = gdi32.NewProc("CreateDIBSection")
@@ -251,6 +252,26 @@ func (w *Window) Close() {
 	})
 }
 
+// Hide / Show 抓屏期间临时隐藏/恢复浮窗。
+//
+// 为什么需要：WDA_EXCLUDEFROMCAPTURE 对 Windows.Graphics.Capture 是「窗口消失」，
+// 但对 **GDI BitBlt 是「该区域变黑」**——实测截屏里留下一块纯黑矩形，
+// 老师 VLM 每帧都会看到它，感知照样被污染（2026-09-12 实拍确认）。
+// 所以抓屏前隐藏、抓完立刻恢复：人眼只在抓屏瞬间（几十毫秒）看到浮窗闪一下，
+// 截屏里则完全干净。demo/教学模式的抓屏频率（秒级）下闪烁无感；
+// 30FPS 实时回路里浮窗基本不可见，介意就在那种场景加 -overlay=false。
+func (w *Window) Hide() {
+	if w != nil && w.hwnd != 0 {
+		procShowWindow.Call(w.hwnd, 0) // SW_HIDE
+	}
+}
+
+func (w *Window) Show() {
+	if w != nil && w.hwnd != 0 {
+		procShowWindow.Call(w.hwnd, 5) // SW_SHOW
+	}
+}
+
 func utf16(s string) uintptr {
 	p, _ := syscall.UTF16PtrFromString(s)
 	return uintptr(unsafe.Pointer(p))
@@ -317,8 +338,10 @@ func (w *Window) create(opt Options) error {
 		fmt.Println("overlay: ⚠️  SetWindowDisplayAffinity 失败，浮窗可能被截屏拍进去（需 Win10 2004+）")
 	}
 
-	// 字体：中文用「Microsoft YaHei UI」，失败退回默认
-	procCreateFontW.Call(
+	// 字体：中文用「Microsoft YaHei UI」，失败退回默认。
+	// ⚠️ 返回值必须接住：之前这里没接，w.font 永远是 0，
+	// SelectObject 选了个 NULL 字体进去，浮窗只剩黑底没有字。
+	font, _, _ := procCreateFontW.Call(
 		uintptr(int32(-opt.FontSize)*96/72), // 高度：负值表示字符高度
 		0, 0, 0,
 		fwBold,
@@ -326,6 +349,7 @@ func (w *Window) create(opt Options) error {
 		defaultCharset, outDefaultPrecis, clipDefaultPrecis, qualityDefault, pitchFF,
 		utf16("Microsoft YaHei UI"),
 	)
+	w.font = font
 
 	// 内存 DC + DIB（ARGB premultiplied），供 UpdateLayeredWindow 使用
 	screenDC, _, _ := procGetDC.Call(0)
@@ -419,15 +443,19 @@ func (w *Window) render() {
 
 	total := int(w.w) * int(w.h)
 
-	// 1) 清成半透明黑底（ARGB premultiplied：alpha=165 的黑
-	//    小端字节序 B,G,R,A = 0,0,0,165）
-	clearA := byte(165)
+	// 1) 清成不透明黑底（不透明的 RGB，透明度交给 ULW 的整窗 SrcConstantAlpha）。
+	//
+	// 为什么不按像素画 alpha：**GDI（DrawTextW）根本不写 alpha 字节**——
+	// 它只改 RGB，alpha 保持底色值。之前注释里"DrawText 直接写不透明的 255"
+	// 是错的，实际文字像素 alpha=底色的 165， premultiplied 语义被破坏，
+	// 实测整窗糊成一块看不清字的黑块（2026-09-12 用户实拍）。
+	// 整窗统一半透明（ULW 阶段做）就没有这个问题，文字是清清楚楚的白字。
 	buf := unsafe.Slice(w.bits, total*4)
 	for i := 0; i < total*4; i += 4 {
 		buf[i] = 0
 		buf[i+1] = 0
 		buf[i+2] = 0
-		buf[i+3] = clearA
+		buf[i+3] = 255
 	}
 
 	// 2) 逐行画文字（白色，alpha 由 DrawText 直接写不透明的 255）
@@ -447,18 +475,21 @@ func (w *Window) render() {
 			dtSingleLine|dtLeft|dtVcenter)
 	}
 
-	// 3) 提交。注意：UpdateLayeredWindow 会拿屏幕 DC 作参照，直接传 0 也行，
-	//    但文档建议传 GetDC(0)。为减少句柄开销，用全局缓存的 screenDC。
+	// 3) 提交。
+	//    ⚠️ pptDst 必须传 NULL：这个参数不是「忽略位置」而是「把窗口移到该坐标」，
+	//    之前传 (0,0) 把浮窗拖到了屏幕左上角（2026-09-12 实拍：黑块出现在左上）。
+	//    位置只由 CreateWindowExW 决定，这里不碰。
+	//    半透明改用整窗 SrcConstantAlpha=170（≈67% 不透明），AlphaFormat=0
+	//    （不按像素 alpha 混合），DIB 本身保持不透明。
 	screenDC, _, _ := procGetDC.Call(0)
 	defer procReleaseDC.Call(0, screenDC)
-	ptDst := point{X: 0, Y: 0} // 位置由窗口自身决定，不移动
 	ptSrc := point{X: 0, Y: 0}
 	size := struct{ CX, CY int32 }{w.w, w.h}
-	blend := blendFunction{Op: 0 /*AC_SRC_OVER*/, Flags: 0, SrcConstantAlpha: 255, AlphaFormat: 1 /*AC_SRC_ALPHA*/}
+	blend := blendFunction{Op: 0 /*AC_SRC_OVER*/, Flags: 0, SrcConstantAlpha: 170, AlphaFormat: 0}
 	procUpdateLayeredWindow.Call(
 		w.hwnd,
 		screenDC,
-		uintptr(unsafe.Pointer(&ptDst)),
+		0, // pptDst = NULL：不移动窗口
 		uintptr(unsafe.Pointer(&size)),
 		w.dcMem,
 		uintptr(unsafe.Pointer(&ptSrc)),

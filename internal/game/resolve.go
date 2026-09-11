@@ -10,15 +10,24 @@ import (
 
 // wasdKeys 是 keys（PC 键鼠）模式下的默认方向键位。
 //
-// 斜向**故意不给默认值**：PC 上斜向移动要同时按两个键，而 ActionKey 只表达单键。
-// 与其静默退化成一个方向（模型以为在斜着走、实际只走了直行），
-// 不如让它在执行前明确报错——错误可见比错误隐蔽好。
-// 需要斜向的游戏请在档案里显式配置 move.keys。
+// 四个正向给默认值；斜向由 wasdDiagonal 组合两个正向键（右下 = s+d）。
+// 若档案在 move.keys 里显式给了某个方向（含斜向），以档案为准。
 var wasdKeys = map[agent.Dir]string{
 	agent.DirUp:    "w",
 	agent.DirDown:  "s",
 	agent.DirLeft:  "a",
 	agent.DirRight: "d",
+}
+
+// wasdDiagonal 是 keys 模式下斜向移动的默认双键组合。
+//
+// PC 键盘游戏斜着走要同时按两个方向键，单个 Code 表达不了，
+// 故这里返回一对键，由后端用 Codes 同时按住。
+var wasdDiagonal = map[agent.Dir][2]string{
+	agent.DirUpLeft:    {"w", "a"},
+	agent.DirUpRight:   {"w", "d"},
+	agent.DirDownLeft:  {"s", "a"},
+	agent.DirDownRight: {"s", "d"},
 }
 
 // dpadKeys 是 dpad 模式下的默认键位（Android keyevent 名，后端会补 KEYCODE_ 前缀）。
@@ -81,11 +90,16 @@ func (p *Profile) resolveMove(a agent.Action) (agent.Action, error) {
 		}, nil
 
 	case MoveKeys, MoveDpad:
+		// keys 模式斜向：需要同时按两个键（右下 = s+d），走 Codes。
+		if p.Move.Mode == MoveKeys {
+			if combo, ok := p.moveCombo(a.Dir); ok {
+				return agent.Action{Kind: agent.ActionKey, Codes: combo, Dur: dur}, nil
+			}
+		}
 		key := p.Move.keyFor(a.Dir)
 		if key == "" {
 			return agent.Action{}, fmt.Errorf(
-				"game: 档案 %q（%s 模式）没有为方向 %s 配置按键；"+
-					"斜向移动需要同时按多个键，请在档案的 move.keys 里显式指定",
+				"game: 档案 %q（%s 模式）没有为方向 %s 配置按键",
 				p.Name, p.Move.Mode, a.Dir)
 		}
 		// Dur>0 让后端「按住」而不是点一下：移动是持续行为，点一下等于原地抖。
@@ -98,7 +112,11 @@ func (p *Profile) resolveMove(a agent.Action) (agent.Action, error) {
 	return agent.Action{}, fmt.Errorf("game: 未知的移动方式 %q", p.Move.Mode)
 }
 
-// resolvePress 把按钮名翻译成一次点击。
+// resolvePress 把按钮名翻译成一次按键或点击。
+//
+// 优先用 Key（PC 键盘游戏：PRESS jump = 按空格），没有配 Key 才退回点击坐标
+// （手游：PRESS jump = 点右下角那个按钮）。这样同一份语义动作在两个平台上
+// 各自落到正确的执行方式，模型完全不用知道底层是键还是触摸。
 func (p *Profile) resolvePress(a agent.Action) (agent.Action, error) {
 	if p == nil {
 		return agent.Action{}, fmt.Errorf("game: 未加载游戏档案，无法执行 PRESS（用 -game 指定档案）")
@@ -111,6 +129,10 @@ func (p *Profile) resolvePress(a agent.Action) (agent.Action, error) {
 		}
 		return agent.Action{}, fmt.Errorf("game: 档案 %q 里没有按钮 %q；可用按钮：%s",
 			p.Name, a.Name, avail)
+	}
+	if btn.Key != "" {
+		// PRESS 是"点一下"语义（不像 MOVE 要按住），Dur 留 0 → 后端做按下+抬起。
+		return agent.Action{Kind: agent.ActionKey, Code: btn.Key}, nil
 	}
 	return agent.Action{Kind: agent.ActionTap, Nx: btn.Pos[0], Ny: btn.Pos[1]}, nil
 }
@@ -127,6 +149,45 @@ func (m MoveProfile) keyFor(d agent.Dir) string {
 		return dpadKeys[d]
 	}
 	return ""
+}
+
+// moveCombo 返回斜向移动的双键组合（仅 keys 模式有意义）。
+//
+// 优先查档案 move.keys 里方向值写成 "a+d" 这类组合的显式配置；
+// 没有则用 WASD 默认组合。正向/非 keys 模式返回 ok=false，
+// 交回 keyFor 的单键路径处理。
+func (p *Profile) moveCombo(d agent.Dir) ([]string, bool) {
+	if p.Move.Mode != MoveKeys {
+		return nil, false
+	}
+	if !d.IsDiagonal() {
+		return nil, false
+	}
+	// 档案显式给了这个方向就完全尊重：组合键（"s+d"）走 Codes，
+	// 单键（"q"）返回 false 交给 keyFor 的单键路径，不与默认组合混用。
+	if spec := strings.TrimSpace(p.Move.Keys[string(d)]); spec != "" {
+		if parts := splitKeys(spec); len(parts) >= 2 {
+			return parts, true
+		}
+		return nil, false
+	}
+	if combo, ok := wasdDiagonal[d]; ok {
+		return []string{combo[0], combo[1]}, true
+	}
+	return nil, false
+}
+
+// splitKeys 把 "s+d" / "s,d" / "s d" 拆成键名列表（去空白、去空项）。
+func splitKeys(s string) []string {
+	raw := strings.NewReplacer(",", "+", " ", "+", "\t", "+").Replace(s)
+	parts := strings.Split(raw, "+")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ProtocolOptions 生成「给老师看的动作协议」配置。

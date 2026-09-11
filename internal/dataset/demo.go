@@ -64,6 +64,7 @@ type Step struct {
 	Ny2        float64   `json:"ny2,omitempty"`
 	DurMs      int64     `json:"dur_ms,omitempty"`
 	Code       string    `json:"code,omitempty"`
+	Codes      []string  `json:"codes,omitempty"` // 多键（PC 斜向移动 s+d）
 	Parsed     bool      `json:"parsed"`
 	LatencyMs  float64   `json:"latency_ms"`
 	OutTokens  int       `json:"out_tokens"`
@@ -130,6 +131,7 @@ func (w *Writer) Step(act agent.Action, info StepInfo, grayPNG, colorJPEG []byte
 		Ny2:        act.Ny2,
 		DurMs:      act.Dur.Milliseconds(),
 		Code:       act.Code,
+		Codes:      act.Codes,
 		Parsed:     info.Parsed,
 		LatencyMs:  info.LatencyMs,
 		OutTokens:  info.OutTokens,

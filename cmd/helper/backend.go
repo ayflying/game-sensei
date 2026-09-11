@@ -63,12 +63,6 @@ func (r actionResolver) Resolve(act agent.Action) (agent.Action, error) {
 
 func (r actionResolver) Profile() *game.Profile { return r.profile }
 
-// pcBackend 控制本机：GDI 抓屏 + SendInput 键鼠。
-type pcBackend struct {
-	actionResolver
-	actuator *input.Actuator
-}
-
 func newPCBackend(prof *game.Profile, live bool) *pcBackend {
 	act := input.NewActuator(live)
 	// 注入屏幕尺寸：点击类动作要把归一化坐标换算成鼠标绝对位置。
@@ -83,9 +77,38 @@ func newPCBackend(prof *game.Profile, live bool) *pcBackend {
 	return &pcBackend{actionResolver: actionResolver{profile: prof}, actuator: act}
 }
 
-func (b *pcBackend) Grab(downWidth int) (*image.Gray, error) { return capture.Grab(downWidth) }
+// pcBackend 控制本机：GDI 抓屏 + SendInput 键鼠。
+type pcBackend struct {
+	actionResolver
+	actuator *input.Actuator
+	// beforeShot/afterShot 在每次抓屏前后调用（抓屏时隐藏日志浮窗，
+	// 避免 WDA 在 GDI 截屏里留下黑块污染老师/学生的感知）。可为 nil。
+	beforeShot func()
+	afterShot  func()
+}
 
-func (b *pcBackend) GrabColor() (image.Image, error) { return capture.GrabColor() }
+func (b *pcBackend) shot() func() {
+	if b.beforeShot != nil {
+		b.beforeShot()
+	}
+	return b.afterShot
+}
+
+func (b *pcBackend) Grab(downWidth int) (*image.Gray, error) {
+	restore := b.shot()
+	if restore != nil {
+		defer restore()
+	}
+	return capture.Grab(downWidth)
+}
+
+func (b *pcBackend) GrabColor() (image.Image, error) {
+	restore := b.shot()
+	if restore != nil {
+		defer restore()
+	}
+	return capture.GrabColor()
+}
 
 func (b *pcBackend) Apply(act agent.Action) error {
 	resolved, err := b.Resolve(act)

@@ -21,9 +21,12 @@ import (
 	"image/png"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/ayflying/game-sensei/internal/agent"
 	"github.com/ayflying/game-sensei/internal/capture"
 	"github.com/ayflying/game-sensei/internal/gamewin"
+	"github.com/ayflying/game-sensei/internal/input"
 )
 
 func main() {
@@ -71,6 +74,38 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("✅ 已还原并置顶 %d 个窗口\n", n)
+
+	case "fg":
+		fmt.Printf("当前前台窗口: %q\n", gamewin.ForegroundTitle())
+
+	case "press":
+		// win press w 1000  → 真实按住 w 键 1 秒（注入链路自测）
+		if len(args) < 2 {
+			fmt.Println("用法: win press <键名> [时长ms]")
+			os.Exit(2)
+		}
+		ms := 500
+		if len(args) > 2 {
+			fmt.Sscanf(args[2], "%d", &ms)
+		}
+		gamewin.EnsureDPIAware()
+		act := input.NewActuator(true)
+		act.Screen = func() (int, int, error) {
+			r, err := capture.Bounds()
+			if err != nil {
+				return 0, 0, err
+			}
+			return r.Dx(), r.Dy(), nil
+		}
+		err := act.Apply(agent.Action{
+			Kind: agent.ActionKey, Code: args[1], Dur: time.Duration(ms) * time.Millisecond,
+		})
+		if err != nil {
+			fmt.Printf("⚠️  按键失败: %v\n", err)
+			os.Exit(1)
+		}
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		fmt.Printf("✅ 已注入 %s 按住 %dms（前台: %q）\n", args[1], ms, gamewin.ForegroundTitle())
 
 	case "shot":
 		out := "shot.png"

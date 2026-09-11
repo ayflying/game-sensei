@@ -85,8 +85,13 @@ type Button struct {
 	Name string `json:"name"`
 	// Aliases 别名（中英文均可），解析时一并接受，写日志仍用 Name。
 	Aliases []string `json:"aliases,omitempty"`
-	// Pos 按钮中心的归一化坐标 [x, y]。
-	Pos [2]float64 `json:"pos"`
+	// Pos 按钮中心的归一化坐标 [x, y]。手游（触摸点击）必填；
+	// PC 键盘按钮（Key 非空）可以省略，默认 (0,0)。
+	Pos [2]float64 `json:"pos,omitempty"`
+	// Key PC 键位：非空时 PRESS 这个按钮 = 按这个键盘键（而不是点击坐标）。
+	// 同一款游戏的手游档案与 PC 档案因此可以只差在按钮的"落点"表达方式上，
+	// 语义层（PRESS name=interact）完全不变。
+	Key string `json:"key,omitempty"`
 	// Note 一句话说明，会拼进老师提示词（模型需要知道这个按钮是干嘛的）。
 	Note string `json:"note,omitempty"`
 }
@@ -222,6 +227,12 @@ func (p *Profile) normalize() error {
 			return fmt.Errorf("按钮名 %q 重复", b.Name)
 		}
 		seen[b.Name] = true
+		b.Key = strings.TrimSpace(b.Key)
+		// 按钮要么有坐标（点击），要么有键位（PC 键盘），二者皆无则无法执行。
+		// 校验放在这里而不是执行时：拼错字段名/漏写 pos 要立刻报错，不许静默退化。
+		if b.Key == "" && (b.Pos[0] == 0 && b.Pos[1] == 0) {
+			return fmt.Errorf("按钮 %q 既没有 key 也没有有效 pos，PRESS 无法执行", b.Name)
+		}
 		if !inUnitRange(b.Pos[0]) || !inUnitRange(b.Pos[1]) {
 			return fmt.Errorf("按钮 %q 的 pos 必须是 0~1 的归一化坐标", b.Name)
 		}
@@ -265,7 +276,10 @@ func (p *Profile) ButtonNames() []string {
 	return out
 }
 
-// buttonList 返回带说明的按钮清单，如 "jump(跳跃)"，供提示词使用。
+// buttonList 返回带说明的按钮清单，如 "jump(跳跃)" 或 "interact(F)"，供提示词使用。
+//
+// PC 键盘按钮（有 Key）优先展示键位——老师看到「交互(F)」才知道该 PRESS interact，
+// 看到坐标反而没用（PC 上不是靠点坐标交互的）。
 func (p *Profile) buttonList() []string {
 	if p == nil {
 		return nil
@@ -274,6 +288,10 @@ func (p *Profile) buttonList() []string {
 	for _, b := range p.Buttons {
 		label := b.Name
 		switch {
+		case b.Key != "" && b.Note != "":
+			label += "(" + b.Key + "：" + b.Note + ")"
+		case b.Key != "":
+			label += "(" + b.Key + ")"
 		case b.Note != "":
 			label += "(" + b.Note + ")"
 		case len(b.Aliases) > 0:

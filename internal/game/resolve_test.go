@@ -1,6 +1,7 @@
 package game
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -109,20 +110,69 @@ func TestResolve_按键模式(t *testing.T) {
 	}
 }
 
-// 斜向在 keys 模式下没有默认键位：ActionKey 只表达单键，
-// 静默退化成一个方向会让「斜着走」名不副实，宁可报错。
-func TestResolve_按键模式斜向应报错(t *testing.T) {
+// 斜向在 keys 模式下默认组合两个正向键（左上 = w+a）：
+// PC 键盘游戏「斜着走」就是同时按两个键，ActionKey 的 Codes 表达多键。
+// 早期 Codes 不存在时这里故意报错；多键支持落地后改为验证组合正确性。
+func TestResolve_按键模式斜向组合双键(t *testing.T) {
 	p, err := Load("pc_generic")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Resolve(agent.Action{Kind: agent.ActionMove, Dir: agent.DirUpLeft}); err == nil {
-		t.Error("未配置 keys 的斜向应报错")
+	act, err := p.Resolve(agent.Action{Kind: agent.ActionMove, Dir: agent.DirUpLeft, Dur: 300 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("keys 模式斜向应默认组合双键: %v", err)
 	}
-	// 但显式配置后必须能用
-	p.Move.Keys = map[string]string{"up_left": "w"}
-	if _, err := p.Resolve(agent.Action{Kind: agent.ActionMove, Dir: agent.DirUpLeft}); err != nil {
-		t.Errorf("显式配置斜向后应能解析: %v", err)
+	if act.Kind != agent.ActionKey || len(act.Codes) != 2 || act.Codes[0] != "w" || act.Codes[1] != "a" {
+		t.Fatalf("得到 %v codes=%v, 期望 ActionKey codes=[w a]", act.Kind, act.Codes)
+	}
+	if act.Dur != 300*time.Millisecond {
+		t.Errorf("Dur = %v, 期望 300ms", act.Dur)
+	}
+	// 档案显式配置单键覆盖默认组合（例如游戏只认一个键）
+	p.Move.Keys = map[string]string{"up_left": "q"}
+	act, err = p.Resolve(agent.Action{Kind: agent.ActionMove, Dir: agent.DirUpLeft})
+	if err != nil {
+		t.Fatalf("显式配置斜向后应能解析: %v", err)
+	}
+	if act.Kind != agent.ActionKey || act.Code != "q" {
+		t.Fatalf("显式配置应走单键路径, 得到 %v/%q codes=%v", act.Kind, act.Code, act.Codes)
+	}
+}
+
+// 键盘按钮（Key 非空）：PRESS 落成按键盘键，而不是点击坐标。
+func TestResolve_键盘按钮落成按键(t *testing.T) {
+	p := &Profile{Name: "PC游戏"}
+	p.Move.Mode = MoveKeys
+	p.Buttons = []Button{
+		{Name: "interact", Key: "f", Note: "交互"},
+		{Name: "jump", Key: "space"},
+		{Name: "mobile_btn", Pos: [2]float64{0.8, 0.8}}, // 对照组：坐标按钮
+	}
+	if err := p.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		want agent.Action
+	}{
+		{"interact", agent.Action{Kind: agent.ActionKey, Code: "f"}},
+		{"jump", agent.Action{Kind: agent.ActionKey, Code: "space"}},
+		{"mobile_btn", agent.Action{Kind: agent.ActionTap, Nx: 0.8, Ny: 0.8}},
+	} {
+		got, err := p.Resolve(agent.Action{Kind: agent.ActionPress, Name: c.name})
+		if err != nil {
+			t.Fatalf("PRESS %s: %v", c.name, err)
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("PRESS %s = %+v, 期望 %+v", c.name, got, c.want)
+		}
+	}
+	// 既没 key 也没 pos 的按钮要在加载时报错，不许静默
+	bad := &Profile{Name: "坏档案"}
+	bad.Move.Mode = MoveKeys
+	bad.Buttons = []Button{{Name: "ghost"}}
+	if err := bad.normalize(); err == nil {
+		t.Error("无 key 无 pos 的按钮应校验失败")
 	}
 }
 
@@ -210,7 +260,7 @@ func TestResolve_幂等(t *testing.T) {
 		if err != nil {
 			t.Fatalf("已是 L2 的动作不该报错: %v", err)
 		}
-		if out != in {
+		if !reflect.DeepEqual(out, in) {
 			t.Errorf("已是 L2 的动作被改动了: %+v -> %+v", in, out)
 		}
 	}
@@ -223,7 +273,7 @@ func TestResolve_幂等(t *testing.T) {
 	if err != nil {
 		t.Fatalf("对已展开的动作再次 Resolve 不该报错: %v", err)
 	}
-	if twice != once {
+	if !reflect.DeepEqual(twice, once) {
 		t.Errorf("Resolve 不幂等: %+v -> %+v", once, twice)
 	}
 }

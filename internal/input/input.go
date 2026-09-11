@@ -32,9 +32,10 @@ import (
 )
 
 var (
-	user32           = syscall.NewLazyDLL("user32.dll")
-	procSendInput    = user32.NewProc("SendInput")
-	procSetCursorPos = user32.NewProc("SetCursorPos")
+	user32             = syscall.NewLazyDLL("user32.dll")
+	procSendInput      = user32.NewProc("SendInput")
+	procSetCursorPos   = user32.NewProc("SetCursorPos")
+	procMapVirtualKeyW = user32.NewProc("MapVirtualKeyW")
 )
 
 // Win32 常量。
@@ -42,7 +43,9 @@ const (
 	inputMouse    = 0
 	inputKeyboard = 1
 
-	keyeventfKeyup = 0x0002
+	keyeventfKeyup    = 0x0002
+	keyeventfScancode = 0x0008 // 事件携带扫描码（游戏引擎只认这个）
+	mapvkVKToVSC      = 0      // MapVirtualKeyW: 虚拟键码 → 扫描码
 
 	mouseeventfMove       = 0x0001
 	mouseeventfLeftdown   = 0x0002
@@ -117,18 +120,30 @@ func send(inputs []winInput) error {
 }
 
 // keyDown/keyUp 构造单条键盘 INPUT。
+//
+// ⚠️ 必须带扫描码（KEYEVENTF_SCANCODE）：只给 Vk 的注入事件，
+// 系统消息循环（WM_KEYDOWN）认，但 UE4/DirectInput/Raw Input 这类
+// **按扫描码轮询键盘的游戏直接忽略**——实测洛克王国：世界（UE4）里
+// 裸 VK 的 W 按住 1 秒角色纹丝不动，带上扫描码才生效（2026-09-12）。
+// Vk 字段保留：两类消费者各取所需。
 func keyDown(vk uint16) winInput {
 	var in winInput
 	in.Type = inputKeyboard
-	in.setKeybd(keybdInput{Vk: vk})
+	in.setKeybd(keybdInput{Vk: vk, Scan: vkToScan(vk), Flags: keyeventfScancode})
 	return in
 }
 
 func keyUp(vk uint16) winInput {
 	var in winInput
 	in.Type = inputKeyboard
-	in.setKeybd(keybdInput{Vk: vk, Flags: keyeventfKeyup})
+	in.setKeybd(keybdInput{Vk: vk, Scan: vkToScan(vk), Flags: keyeventfScancode | keyeventfKeyup})
 	return in
+}
+
+// vkToScan 把虚拟键码换算成扫描码（MAPVK_VK_TO_VSC）。
+func vkToScan(vk uint16) uint16 {
+	sc, _, _ := procMapVirtualKeyW.Call(uintptr(vk), mapvkVKToVSC)
+	return uint16(sc)
 }
 
 // Actuator 执行动作。Live=false 时只记录、不真正发送（dry-run）。
@@ -169,6 +184,24 @@ func (a *Actuator) Apply(act agent.Action) error {
 	}
 	switch act.Kind {
 	case agent.ActionKey:
+		// 多键（PC 斜向移动 = 同时按住两键）：逐个走同一套按住逻辑，
+		// holdKey 本身按 code 独立记账，两个键各自刷新代次，互不干扰。
+		if len(act.Codes) > 0 {
+			for _, c := range act.Codes {
+				vk := KeyToVK(c)
+				if vk == 0 {
+					return fmt.Errorf("input: 未知按键 %q", c)
+				}
+				if act.Dur > 0 {
+					a.holdKey(c, vk, act.Dur)
+					continue
+				}
+				if err := send([]winInput{keyDown(vk), keyUp(vk)}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 		vk := KeyToVK(act.Code)
 		if vk == 0 {
 			return fmt.Errorf("input: 未知按键 %q", act.Code)
