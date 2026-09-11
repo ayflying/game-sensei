@@ -78,18 +78,29 @@
 ```
 game-sensei/
 ├── cmd/helper/main.go        # 编排：实时回路 + 延迟统计 + 信号退出（Phase 0 已实现）
-├── cmd/helper/backend.go     # 后端抽象：pcBackend（GDI+SendInput）/ adbBackend（ADB）
+├── cmd/helper/backend.go     # 后端抽象 + 档案挂载：L1 语义动作 → L2 平台动作
+├── cmd/helper/demo.go        # Phase 2 在线示范回路（老师出动作 + 采集数据集）
 ├── internal/
-│   ├── capture/              # 截屏（GDI BitBlt → 灰度降采样，纯 syscall）
+│   ├── capture/              # 截屏（GDI BitBlt → 灰度降采样 / 彩色图，纯 syscall）
 │   ├── android/              # 安卓 ADB 后端：截图 / 触控 / 滑动 / 摇杆 / 按键 / 拉起应用
-│   ├── agent/                # Actor 接口 + 规则学生（后续换量化 ONNX 实现）
-│   ├── input/                # 键鼠（user32!SendInput，纯 syscall）
-│   ├── teacher/              # Ollama 客户端 + 轨迹评估器 + 提示词（Phase 1 已落地）
+│   ├── agent/                # 动作空间（L1/L2）+ 容错解析器 + Actor 接口 + 规则学生
+│   │   ├── agent.go          # Action / ActionKind / RuleActor
+│   │   ├── dir.go            # Dir 方向体系（8 向 + 中英文别名 + 向量）
+│   │   └── parse.go          # 老师文本 → 动作（含 ActionProtocol 提示词）
+│   ├── game/                 # 游戏档案：换游戏只换一份 JSON（见 §9.5）
+│   │   ├── profile.go        # 档案结构 / 加载 / 校验 / 按钮查找
+│   │   ├── resolve.go        # L1 → L2 展开（MOVE→摇杆/按键，PRESS→点击）
+│   │   └── profiles/*.json   # 内置档案：nrc / mobile_generic / pc_generic
+│   ├── input/                # 键鼠（SendInput + SetCursorPos + mouse_event，纯 syscall）
+│   ├── vision/               # 区域平均降采样 + JPEG 编码（老师判读用）
+│   ├── dataset/              # 示范数据集落盘（meta.json / trajectory.jsonl / frames）
+│   ├── teacher/              # Ollama 客户端 + 轨迹评估器 + 动作示范器（Phase 1/2）
 │   ├── memory/               # 轨迹缓冲
-│   └── config/               # 帧率/降采样/动作集/目标平台（按游戏可配）
+│   └── config/               # 帧率/降采样/动作集/目标平台/游戏档案（按游戏可配）
 ├── models/                   # *.onnx（trainer 导出，运行时热载，不入库）
 ├── tools/                    # 本地测试工具（非运行时依赖）
 │   ├── serve_ollama.sh       # 启动项目自带的 Ollama 实例（独立端口 11435）
+│   ├── grid_overlay.py       # 截图打归一化网格，用于校准新游戏的摇杆/按钮坐标
 │   ├── screenshot.py         # 抓一张截图供 VLM 评测
 │   └── vlm_bench.py          # VLM 选型评测：延迟 / 速度 / 输出质量
 ├── .ollama/                  # 项目内 Ollama 模型库（体积大，不入库）
@@ -266,8 +277,10 @@ type backend interface {
   否则归一化坐标会整体错位（这是早期一次踩坑，已修复并有 `parseForegroundPkg` / `rotationDegrees` 单测覆盖）。
 - **零 CGO 保持**：ADB 后端全部通过 `os/exec` 调用 `adb.exe`，Windows 下带 `CREATE_NO_WINDOW`
   （`0x08000000`）+ `HideWindow`，不弹黑窗口；核心仍然 `CGO_ENABLED=0`。
-- **动作空间扩展**：`agent.Action` 新增 `ActionTap` / `ActionSwipe` / `ActionLongPress`，
-  并带 `Nx,Ny,Nx2,Ny2 float64`（归一化坐标）与 `Dur time.Duration`，实现「一套动作跨分辨率复用」。
+- **动作空间分层**：`agent.Action` 分 L1 语义层（`ActionMove` / `ActionPress`，
+  跨游戏通用）与 L2 执行层（`ActionTap` / `ActionSwipe` / `ActionLongPress` /
+  `ActionJoystick` / `ActionKey` / `ActionMouseMove`，平台相关），坐标一律归一化
+  （0~1），由游戏档案负责两层之间的翻译。详见 §9.5。
 - **安卓默认帧率自动降为 5 FPS**（`screencap` 约 0.94s/帧、`input` 约 0.3~0.6s/次），
   未显式指定 `-fps` 时由 `openBackend` 自动设置——**PC 的 30FPS 假设在 ADB 上不成立**。
 
@@ -293,8 +306,9 @@ go run ./cmd/helper -target android -app com.tencent.nrc -launch -dry-run -teach
 | `-target` | `pc`（默认）/ `android` |
 | `-adb` | `adb.exe` 路径；空则自动查找 |
 | `-serial` | 设备序列号；单设备可省，多设备必填 |
-| `-app` | 安卓包名（如 `com.tencent.nrc`），仅安卓后端用 |
+| `-app` | 安卓包名（如 `com.tencent.nrc`），仅安卓后端用；`-game` 的档案带包名时可省 |
 | `-launch` | 启动 `-app` 指定的应用并等待其进入前台 |
+| `-game` | 游戏档案（档案名或 JSON 路径），决定动作怎么落到设备上，见 §9.5 |
 
 ### 9.4 Phase 2：老师在线示范（-demo）
 
@@ -370,11 +384,137 @@ go run ./cmd/helper -target android -serial <sn> -app com.tencent.nrc \
   小模型对提示词里的具体数值极其敏感，写示例时务必用不可直接复制的形式。
 - ⚠️ **单帧决策没有记忆**，容易在原地重复同一动作。已通过 `Demonstrator.PrevAction`
   把上一步喂回去缓解（并把 `prev_action` 一并存进数据集）。
+  **但实测只靠这一条没能打破重复**（8 步动作仍逐字节相同），别把它当成已解决——
+  真正的解法是让动作空间本身更适合小模型，见 §9.5 的分层设计。
 - ⚠️ **动作质量尚未达标**：模型能正确读出画面地标（8/8 答对「帐篷」），
   但读小号距离数字不可靠，且决策偏向提示词的结构先验，
   离「朝 24 米外的目标走过去」这种目标导向导航还很远。
   这正是需要采集示范数据 + 蒸馏学生的原因，不是靠调提示词能解决的。
 - ⚠️ **dry-run 下采不到多样数据**：画面不变 → 老师给同一动作。要有多样性必须 `-live`。
+
+### 9.5 基础操作层：一套动作跨游戏（`internal/game`）
+
+这是框架「不为单一游戏设计」的落点。**换一款游戏，只换一份 JSON 档案。**
+
+#### 为什么要把动作分成两层
+
+早期动作空间是**平台原语**（`TAP x=.. y=..`、`JOYSTICK cx=.. cy=.. tx=..`），
+于是每换一款游戏都要重新告诉模型「摇杆在哪、按钮在哪」——而小模型最不擅长
+恰恰就是输出坐标。实测把摇杆四坐标交给 qwen3.5:9b，它在「`cx/cy/tx/ty`
+到底是什么」上纠结到 **74 秒打满预算**，仍给不出动作。
+
+于是拆成两层：
+
+| 层 | 动作 | 谁输出 | 是否跨游戏通用 |
+|---|---|---|---|
+| **L1 语义层** | `MOVE dir=前`、`PRESS name=jump`、`TAP`、`SWIPE`、`HOLD`、`KEY`、`WAIT` | 老师 / 学生 | ✅ 通用 |
+| **L2 执行层** | `JOYSTICK`（摇杆推杆）、`KEY`（按住某键）、`TAP`（某像素点）、`MouseMove` | 游戏档案展开 | ❌ 平台相关 |
+
+模型只需要做一次 **8 选 1 的方向分类**（`up\|down\|left\|right\|up_left\|...`），
+摇杆中心与推杆幅度交给档案——它本来就是个**设备常量**，不该每帧回归。
+
+#### 一份档案回答四个问题
+
+```jsonc
+{
+  "name": "洛克王国：世界",
+  "package": "com.tencent.nrc",          // 填了就能用 -game 带出 -app
+  "orientation": "landscape",
+  "move": {
+    "mode": "joystick",                   // joystick | dpad | keys | none
+    "center": [0.21, 0.69],               // 摇杆中心（归一化，实测得到）
+    "radius": [0.09, 0.08]                // 推杆幅度，留空用默认
+  },
+  "buttons": [
+    { "name": "star", "aliases": ["星形", "交互"], "pos": [0.80, 0.81],
+      "note": "右下角最大的圆形按钮。坐标实测，功能未完全核验" }
+  ],
+  "hints": ["横屏 3D 开放世界；左下角圆形区域是虚拟摇杆，中心约 x=0.21 y=0.69"]
+}
+```
+
+`hints` 会**逐条拼进老师提示词**，`buttons` 决定 `ACTION PRESS` 的合法取值，
+`move` 决定 `MOVE` 怎么落地。
+
+#### 内置档案与「换游戏」流程
+
+| 档案 | 用途 |
+|---|---|
+| `nrc` | 洛克王国：世界（真机实测坐标） |
+| `mobile_generic` | 通用手游模板（虚拟摇杆在左下） |
+| `pc_generic` | 通用 PC 键鼠（WASD + 鼠标） |
+
+```bash
+# 看看有哪些档案（也可直接读 internal/game/profiles/*.json）
+go run ./cmd/helper -game 不存在的名字      # 报错里会列出全部可用档案
+
+# 用手游档案跑在线示范
+go run ./cmd/helper -target android -serial <sn> -game nrc \
+    -demo -live -demo-steps 20 -goal "靠近任务追踪里的目标"
+
+# 用 PC 档案跑实时回路（dry-run）
+go run ./cmd/helper -game pc_generic -frames 100
+```
+
+**给一款新游戏做档案**（无需改任何 Go 代码）：
+
+1. 用 `tools/grid_overlay.py` 给截图打上归一化网格，直接读出坐标：
+
+   ```bash
+   python tools/grid_overlay.py shot.png --region 0.58,0.45,1.00,1.00 --zoom 2 -o out.jpg
+   ```
+
+2. 把摇杆中心、幅度、按钮坐标填进 `profiles/<游戏名>.json`；
+3. `-game profiles/<游戏名>.json` 跑一轮 dry-run，确认动作解析与展开无误；
+4. 加 `-live` 实跑。
+
+档案查找顺序：**`./profiles/<名>.json` → `.workbuddy/profiles/<名>.json` → 内置档案**，
+因此外部文件可以覆盖内置档案，用来修某个游戏的参数而不必改代码。
+字段名拼错会**立刻报错**（`DisallowUnknownFields`）——静默忽略会让摇杆中心
+悄悄变成 `0,0` 而没人发现。
+
+#### 后端能力矩阵
+
+| L2 动作 | PC（SendInput） | Android（ADB） |
+|---|---|---|
+| `TAP` / `HOLD` | `SetCursorPos` + `mouse_event` | `input tap` / 原地 swipe |
+| `SWIPE` | 分 12 步移动光标（瞬移会被游戏判定为「没动过」） | `input swipe` |
+| `KEY` | 30+ 键名（WASD/空格/ESC/回车/数字/方向键/F1~F12） | `input keyevent`（兼容 `dpad_up` 等写法） |
+| `KEY` 带 `Dur` | **异步按住**：按下即返回，到期抬起；同键重复下达不断刷新代次 | `input keyevent --longpress` |
+| `JOYSTICK` | 无（PC 上由 `move.mode=keys` 落成按键） | 支持（推杆即 swipe） |
+| `MouseMove` | 支持 | **明确报错**（手机没有鼠标，静默忽略会掩盖上游 bug） |
+
+两个设计决定值得记下来：
+
+- **PC 的「按住」是异步的**。实时回路是 30FPS 节拍，一次阻塞 1 秒会让整条回路停摆。
+  语义上也更对：持续移动是「状态」而非「一次持续 1 秒的调用」——每帧重复下达
+  `MOVE` 会不断刷新代次，键就一直按着；停止下达后自然松开。
+- **退出时必须 `ReleaseAll`**，否则最后一步的「按住」会把键卡在按下状态，
+  回到桌面表现为键盘失灵（在记事本里一直输出同一个字符）。
+
+#### L1→L2 是幂等的
+
+`Profile.Resolve` 对已是 L2 的动作原样返回，所以后端可以无脑「先 Resolve 再执行」，
+不必分辨动作来自模型还是来自别的环节。`backend.Resolve` 暴露给调用方只为打日志：
+示范回路会把两边都打出来，左边是模型意图、右边是落到设备上的操作——
+
+```
+[ 3/20] 执行 move:up/800ms         → joy:0.210,0.690->0.210,0.610/800ms | 朝前（上）方向移动 800ms
+```
+
+#### 当前状态与未验证项（诚实记录）
+
+- ✅ **已验证**：档案加载与校验、L1→L2 展开（含边界夹紧、斜向等长、错误路径）、
+  两端后端的键名映射与坐标换算、端到端契约
+  （同一句 `ACTION MOVE dir=前` → 手游推摇杆 / PC 按住 `W`）、
+  PC 端 dry-run 实跑。
+- ⚠️ **未验证**：`nrc` 档案里的**按钮坐标只经过「点得到」验证，功能未逐一核验**
+  （狼头按钮点下去疑似没打开面板，可能是被虚拟摇杆热区吞掉了）。
+  档案里已如实标注 `note`，用之前请自己在游戏里过一遍。
+- ⚠️ **未验证**：PC 端新增的点击/拖拽/按住**没有做实机验证**（会操作到真实桌面），
+  仅由单测覆盖换算与状态机。首次使用请先 dry-run，再小步 `-live`。
+- ⚠️ **手机端摇杆幅度 `radius` 未做二分调优**，取的是手游常见值 9%/8%；
+  若某些游戏有摇杆死区，可能需要按游戏调大。
 
 ---
 

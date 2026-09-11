@@ -12,11 +12,13 @@
 //	       [-teacher] [-teacher-url http://127.0.0.1:11435] [-teacher-model qwen3.5:9b]
 //	       [-eval-every 300] [-eval-frames 6] [-eval-width 640] [-goal "..."] [-eval-out dir]
 //	       [-target pc|android] [-adb path] [-serial sn] [-app 包名] [-launch]
-//	       [-demo] [-demo-steps 20] [-demo-width 1024] [-demo-wait 2s]
+//	       [-game nrc] [-demo] [-demo-steps 20] [-demo-width 1024] [-demo-wait 2s]
 //	       [-demo-out dir] [-demo-color] [-demo-hints "a;b"]
 //
 // 默认 dry-run（不真正发送输入），Ctrl+C 或达到 -frames 后干净退出。
 // -target android 时通过 ADB 遥控手机：截屏为感知、触摸 tap/swipe 为行动。
+// -game 指定游戏档案（internal/game/profiles/*.json）：它把「朝前走 / 按跳跃」
+// 这类**跨游戏通用的语义动作**翻译成本平台的具体操作，因此换游戏只需换档案。
 //
 // 三种运行形态：
 //
@@ -42,9 +44,33 @@ import (
 
 	"github.com/ayflying/game-sensei/internal/agent"
 	"github.com/ayflying/game-sensei/internal/config"
+	"github.com/ayflying/game-sensei/internal/game"
 	"github.com/ayflying/game-sensei/internal/memory"
 	"github.com/ayflying/game-sensei/internal/teacher"
 )
+
+// printProfile 打印游戏档案摘要，让「现在按哪套操作在跑」一目了然。
+func printProfile(p *game.Profile) {
+	fmt.Printf("游戏档案: %s", p.Name)
+	if p.Package != "" {
+		fmt.Printf("（%s）", p.Package)
+	}
+	fmt.Println()
+
+	switch p.Move.Mode {
+	case game.MoveJoystick:
+		fmt.Printf("  移动: 虚拟摇杆，中心 %.2f,%.2f 幅度 %.2f,%.2f\n",
+			p.Move.Center[0], p.Move.Center[1], p.Move.Radius[0], p.Move.Radius[1])
+	case game.MoveKeys, game.MoveDpad:
+		fmt.Printf("  移动: %s\n", p.Move.Mode)
+	default:
+		fmt.Println("  移动: 未配置（MOVE 动作会报错）")
+	}
+	if names := p.ButtonNames(); len(names) > 0 {
+		fmt.Printf("  按钮: %s\n", strings.Join(names, "、"))
+	}
+	fmt.Printf("  界面先验: %d 条\n", len(p.Hints))
+}
 
 func main() {
 	cfg := config.Default()
@@ -78,6 +104,8 @@ func main() {
 	flag.StringVar(&cfg.Serial, "serial", cfg.Serial, "ADB 设备序列号（空=取唯一在线设备）")
 	flag.StringVar(&cfg.AppPackage, "app", cfg.AppPackage, "android 模式要操作的应用包名")
 	launchApp := flag.Bool("launch", false, "android 模式下先启动 -app 指定的应用")
+	flag.StringVar(&cfg.Game, "game", cfg.Game,
+		"游戏档案：档案名（如 nrc、pc_generic）或 JSON 路径；空=不带游戏知识")
 	flag.Parse()
 
 	// 用户未显式指定帧率时，按平台给不同默认值：ADB 截图单帧约 200~400ms，
@@ -110,10 +138,32 @@ func main() {
 	}
 	fmt.Printf("game-sensei | 模式=%s | 目标=%dFPS | 降采样宽=%dpx\n", mode, cfg.TargetFPS, cfg.DownsampleWidth)
 
-	be, err := openBackend(cfg, *launchApp)
+	// 游戏档案：把「语义动作」（朝前走 / 按跳跃）翻译成「这台设备上的具体操作」
+	// （把虚拟摇杆推到哪里 / 按哪个键）。换游戏只需换一份档案。
+	var prof *game.Profile
+	if cfg.Game != "" {
+		p, err := game.Load(cfg.Game)
+		if err != nil {
+			log.Fatalf("加载游戏档案失败: %v", err)
+		}
+		prof = p
+		printProfile(p)
+		// 档案带了包名而用户没显式指定 -app 时直接采用：少一处要记的配置
+		if cfg.AppPackage == "" {
+			cfg.AppPackage = p.Package
+		}
+	} else {
+		fmt.Println("未指定游戏档案（-game）：只能做 TAP/SWIPE/HOLD/KEY/WAIT，")
+		fmt.Printf("  MOVE/PRESS 会明确报错。内置档案：%s\n", strings.Join(game.Names(), "、"))
+	}
+
+	be, err := openBackend(cfg, prof, *launchApp)
 	if err != nil {
 		log.Fatalf("后端初始化失败: %v", err)
 	}
+	// 退出时释放后端资源：PC 端会把仍按住的键抬起来，
+	// 否则「按住移动」的最后一步会让键盘卡在按下状态。
+	defer func() { _ = be.Close() }()
 	fmt.Printf("控制目标: %s\n", be.Describe())
 
 	scrW, scrH, err := be.Size()
@@ -175,7 +225,12 @@ func main() {
 				}
 			}
 		}
-		dem := &teacher.Demonstrator{Client: demoClient, Goal: cfg.Goal, Hints: hints}
+		dem := &teacher.Demonstrator{
+			Client:  demoClient,
+			Profile: prof,
+			Goal:    cfg.Goal,
+			Hints:   hints,
+		}
 
 		fmt.Printf("老师: %s @ %s (Ollama %s) | 已关思考（think=false），单步约 1~2s\n",
 			cfg.TeacherModel, cfg.TeacherURL, ver)

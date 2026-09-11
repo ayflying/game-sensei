@@ -106,13 +106,30 @@ func (d *Device) JoystickNorm(cx, cy, offX, offY float64, dur time.Duration) err
 //
 //	"back" / "KEYCODE_BACK" / "4"  →  input keyevent 4
 //
-// 常用：back、home、app_switch、enter、del。
+// 常用：back、home、app_switch、enter、del、dpad_up/dpad_down/dpad_left/dpad_right。
 func (d *Device) Key(code string) error {
 	name := normalizeKeyCode(code)
 	if name == "" {
 		return fmt.Errorf("android: 空按键名")
 	}
 	_, err := d.Shell("input keyevent " + name)
+	return err
+}
+
+// KeyHold 长按一个键（对应 `input keyevent --longpress`）。
+//
+// 用于「按住方向键持续移动」这类需求——某些游戏（尤其带虚拟十字键的）
+// 只有长按才会连续移动，点一下只走一格。
+func (d *Device) KeyHold(code string, dur time.Duration) error {
+	name := normalizeKeyCode(code)
+	if name == "" {
+		return fmt.Errorf("android: 空按键名")
+	}
+	// 短按没必要走 longpress（有些 ROM 对 --longpress 的实现有差异）
+	if dur < 400*time.Millisecond {
+		return d.Key(code)
+	}
+	_, err := d.Shell("input keyevent --longpress " + name)
 	return err
 }
 
@@ -217,7 +234,15 @@ func (d *Device) Apply(act agent.Action) error {
 		_, _, err := d.LongPressNorm(act.Nx, act.Ny, act.Dur)
 		return err
 	case agent.ActionKey:
+		if act.Dur > 0 {
+			return d.KeyHold(act.Code, act.Dur)
+		}
 		return d.Key(act.Code)
+	case agent.ActionMouseMove:
+		// 手机没有鼠标，这个 L2 动作在 Android 上无意义。
+		// 明确报错而不是静默忽略：动作协议里根本不会出现它，
+		// 出现了就说明上游解析或档案配置出了问题，早暴露比悄悄吞掉好。
+		return fmt.Errorf("android: 不支持鼠标相对移动动作（ActionMouseMove）")
 	default:
 		return nil
 	}

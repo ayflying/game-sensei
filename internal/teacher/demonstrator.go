@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/ayflying/game-sensei/internal/agent"
+	"github.com/ayflying/game-sensei/internal/game"
 )
 
 // Demonstrator 让老师从「看回放写评语」升级为「直接出动作」——
@@ -14,16 +15,34 @@ import (
 // 关键前提是 Options.Think=false（见 ActionOptions）：实测 qwen3.5:9b
 // 开着思考要 60s+ 且正文常被思考挤空，关掉后 1.2s 稳定产出合规动作。
 // 这决定了老师能不能跑在在线回路里，而不是只能异步查岗。
+//
+// ⚠️ 本类型**不含任何具体游戏的文案**。游戏名、界面先验、可用按钮清单
+// 全部来自 Profile（游戏档案）。加一款新游戏 = 加一份 JSON，这个文件不用动。
 type Demonstrator struct {
 	Client *Client
-	Goal   string   // 游戏目标，写进提示词引导决策
-	Hints  []string // 界面/设备先验（如摇杆中心坐标），减少模型乱猜
+
+	// Profile 是游戏档案：提供游戏名、界面先验、可用动作子集。
+	//
+	// 为 nil 时不带任何游戏知识，提示词退化成「通用动作协议」——
+	// 仍能跑，但模型只能靠猜界面布局，实测格式合规率会明显下降。
+	Profile *game.Profile
+
+	// Goal 游戏目标，写进提示词引导决策。
+	Goal string
+
+	// Hints 是档案之外的临时先验（CLI -demo-hints），用于现场调试
+	// 新游戏、还没攒成档案时先手喂几条。
+	Hints []string
 
 	// PrevAction 是上一步已执行的动作串（agent.Action.String()）。
 	//
 	// 为什么要喂回去：单帧 VLM 没有记忆，若不告诉它刚做过什么，
-	// 它会连续给出同一个动作直到天荒地老（实测 8 步逐字节相同）。
-	// 有了这一句，它至少能在「画面没推进」时换个方向。
+	// 它会连续给出同一个动作直到天荒地老。
+	//
+	// ⚠️ 诚实记录：实测只靠这一条**没能打破重复**（8 步动作仍逐字节相同）。
+	// 保留它是因为它仍是正确的接口设计（多帧示范时迟早要用到），
+	// 但别指望它单独解决问题——真正的解法是让动作空间本身更适合小模型
+	// （见 agent.ActionProtocol 与游戏档案的 MOVE/PRESS 设计）。
 	PrevAction string
 }
 
@@ -35,16 +54,25 @@ type DemoResult struct {
 	Used   bool         // 解析是否成功（失败时 Action 为 ActionNone）
 }
 
-// interfacePrior 是洛克王国：世界的界面先验。
-//
-// 实测教训：不给先验时，模型会输出退化的坐标数组；给了先验，
-// 格式合规率 6/6。先验不是「帮模型作弊」，而是补上单帧图像里
-// 难以推断的界面语义（哪个圆是摇杆、哪个是技能）。
-const interfacePrior = `界面布局常识：
-- 左下角半透明圆形区域 = 虚拟摇杆，按住并推向某方向可移动角色
-- 右下角有若干圆形按钮，一般包括精灵切换、奔跑、跳跃、交互/捕捉技能
-- 顶部有任务追踪文字与坐标；画面中央是玩家角色
-- 若出现对话气泡或选项列表，说明处于对话/菜单中，需要点击选项才能继续`
+// gameName 返回当前游戏名，无档案时用中性说法。
+func (d *Demonstrator) gameName() string {
+	if d.Profile != nil && d.Profile.Name != "" {
+		return "《" + d.Profile.Name + "》"
+	}
+	return "这款游戏"
+}
+
+// protocolOptions 合并档案先验与临时先验，得到给老师的动作协议配置。
+func (d *Demonstrator) protocolOptions() agent.ProtocolOptions {
+	o := d.Profile.ProtocolOptions() // nil Profile 安全，返回零值
+	if len(d.Hints) > 0 {
+		merged := make([]string, 0, len(o.Hints)+len(d.Hints))
+		merged = append(merged, o.Hints...)
+		merged = append(merged, d.Hints...)
+		o.Hints = merged
+	}
+	return o
+}
 
 // BuildDemoPrompt 拼装「出动作」提示词。
 //
@@ -52,14 +80,10 @@ const interfacePrior = `界面布局常识：
 // 而我们要的只有最后那一行动作。
 func (d *Demonstrator) BuildDemoPrompt() string {
 	var b strings.Builder
-	b.WriteString("你是手机游戏《洛克王国：世界》的实时操作助手，这是一款 3D 开放世界精灵收集游戏。\n")
-	b.WriteString(interfacePrior + "\n")
-	if len(d.Hints) > 0 {
-		b.WriteString("\n本机已知信息：\n")
-		for _, h := range d.Hints {
-			b.WriteString("- " + h + "\n")
-		}
-	}
+	b.WriteString("你是" + d.gameName() + "的实时操作助手。\n")
+
+	opts := d.protocolOptions()
+	b.WriteString("\n看这张截图，决定此刻最该做的**一个**动作。\n")
 	if d.Goal != "" {
 		fmt.Fprintf(&b, "\n【当前目标】%s\n", d.Goal)
 	}
@@ -68,11 +92,9 @@ func (d *Demonstrator) BuildDemoPrompt() string {
 		b.WriteString("如果画面显示这一步没有推进目标（角色没靠近目标、界面没变化），" +
 			"请换一个明显不同的动作；如果正在有效推进，就保持方向继续。\n")
 	}
-	b.WriteString("\n看这张截图。先判断三件事（不要写出来）：主角在画面什么位置、" +
-		"目标在哪一侧、当前是自由探索还是对话/菜单。然后据此决定此刻最该做的**一个**动作。\n")
-	b.WriteString(agent.ActionProtocol())
-	b.WriteString("\n坐标必须是 0~1 的归一化值（左上角 0,0；右下角 1,1）。")
-	b.WriteString("只输出一行动作，不要解释，不要输出多行。")
+	b.WriteString("\n先判断三件事（不要写出来）：主角在画面什么位置、" +
+		"目标在哪一侧、当前是自由探索还是对话/菜单。然后据此输出动作。\n")
+	b.WriteString(agent.ActionProtocol(opts))
 	return b.String()
 }
 

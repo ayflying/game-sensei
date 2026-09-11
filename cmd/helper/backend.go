@@ -9,6 +9,7 @@ import (
 	"github.com/ayflying/game-sensei/internal/android"
 	"github.com/ayflying/game-sensei/internal/capture"
 	"github.com/ayflying/game-sensei/internal/config"
+	"github.com/ayflying/game-sensei/internal/game"
 	"github.com/ayflying/game-sensei/internal/input"
 )
 
@@ -27,30 +28,72 @@ type backend interface {
 	// 与 Grab 分开是刻意的：学生要的是低延迟小张量，老师要的是能认字的清晰画面，
 	// 两者的分辨率与色彩诉求正好相反，混用一个接口必然有一方将就。
 	GrabColor() (image.Image, error)
-	// Apply 执行一个动作（dry-run 时为空操作）。
+	// Resolve 把语义动作（L1）展开成平台动作（L2）。
+	// 幂等：已是 L2 的动作原样返回。主要用于日志与预检——
+	// Apply 内部也会先做一次，调用方不必先 Resolve 再 Apply。
+	Resolve(act agent.Action) (agent.Action, error)
+	// Apply 执行一个动作（dry-run 时为空操作）。入参可以是 L1 或 L2。
 	Apply(act agent.Action) error
+	// Profile 返回当前生效的游戏档案（未加载时为 nil）。
+	Profile() *game.Profile
 	// Size 返回当前屏幕像素尺寸（PC 为桌面尺寸；Android 为当前方向尺寸）。
 	Size() (w, h int, err error)
 	// Describe 返回用于日志的平台标识。
 	Describe() string
 	// Live 报告是否真实发送输入。
 	Live() bool
+	// Close 释放后端资源（PC 端会抬起所有仍按住的键）。
+	Close() error
 }
+
+// actionResolver 给后端挂上游戏档案，负责 L1 → L2 的翻译。
+//
+// 把「档案」放在这一层而不是回路里，是为了让回路的代码完全不知道
+// 游戏的存在：回路只说「朝前走」，能不能做到、怎么做到由后端 + 档案决定。
+type actionResolver struct {
+	profile *game.Profile
+}
+
+func (r actionResolver) Resolve(act agent.Action) (agent.Action, error) {
+	if r.profile == nil {
+		return act, nil // 没挂档案：只认 L2 动作，L1 会在执行层报错
+	}
+	return r.profile.Resolve(act)
+}
+
+func (r actionResolver) Profile() *game.Profile { return r.profile }
 
 // pcBackend 控制本机：GDI 抓屏 + SendInput 键鼠。
 type pcBackend struct {
+	actionResolver
 	actuator *input.Actuator
 }
 
-func newPCBackend(live bool) *pcBackend {
-	return &pcBackend{actuator: input.NewActuator(live)}
+func newPCBackend(prof *game.Profile, live bool) *pcBackend {
+	act := input.NewActuator(live)
+	// 注入屏幕尺寸：点击类动作要把归一化坐标换算成鼠标绝对位置。
+	// 不注入的话点击会明确报错，而不是点到 (0,0) 去。
+	act.Screen = func() (int, int, error) {
+		r, err := capture.Bounds()
+		if err != nil {
+			return 0, 0, err
+		}
+		return r.Dx(), r.Dy(), nil
+	}
+	return &pcBackend{actionResolver: actionResolver{profile: prof}, actuator: act}
 }
 
 func (b *pcBackend) Grab(downWidth int) (*image.Gray, error) { return capture.Grab(downWidth) }
 
 func (b *pcBackend) GrabColor() (image.Image, error) { return capture.GrabColor() }
 
-func (b *pcBackend) Apply(act agent.Action) error { return b.actuator.Apply(act) }
+func (b *pcBackend) Apply(act agent.Action) error {
+	resolved, err := b.Resolve(act)
+	if err != nil {
+		return err
+	}
+	return b.actuator.Apply(resolved)
+}
 
 func (b *pcBackend) Size() (int, int, error) {
 	r, err := capture.Bounds()
@@ -64,16 +107,23 @@ func (b *pcBackend) Describe() string { return "pc（本机 GDI 截屏 + SendInp
 
 func (b *pcBackend) Live() bool { return b.actuator.Live }
 
+// Close 抬起仍按住的键：否则退出后键盘会卡在按下状态。
+func (b *pcBackend) Close() error {
+	b.actuator.ReleaseAll()
+	return nil
+}
+
 // adbBackend 控制 Android 设备：ADB 截图 + 触摸输入。
 //
 // 触摸坐标由 agent 输出的归一化值换算，故同一套策略可跨设备分辨率复用。
 type adbBackend struct {
+	actionResolver
 	dev  *android.Device
 	live bool
 }
 
-func newADBBackend(dev *android.Device, live bool) *adbBackend {
-	return &adbBackend{dev: dev, live: live}
+func newADBBackend(dev *android.Device, prof *game.Profile, live bool) *adbBackend {
+	return &adbBackend{actionResolver: actionResolver{profile: prof}, dev: dev, live: live}
 }
 
 func (b *adbBackend) Grab(downWidth int) (*image.Gray, error) { return b.dev.Grab(downWidth) }
@@ -88,10 +138,14 @@ func (b *adbBackend) GrabColor() (image.Image, error) {
 }
 
 func (b *adbBackend) Apply(act agent.Action) error {
+	resolved, err := b.Resolve(act)
+	if err != nil {
+		return err
+	}
 	if !b.live {
 		return nil // dry-run：吞掉动作，手机不会有任何触碰
 	}
-	return b.dev.Apply(act)
+	return b.dev.Apply(resolved)
 }
 
 func (b *adbBackend) Size() (int, int, error) {
@@ -108,11 +162,13 @@ func (b *adbBackend) Describe() string {
 
 func (b *adbBackend) Live() bool { return b.live }
 
+func (b *adbBackend) Close() error { return nil }
+
 // openBackend 按 -target 构造后端；android 模式下可选自动拉起目标应用。
-func openBackend(cfg config.Config, launch bool) (backend, error) {
+func openBackend(cfg config.Config, prof *game.Profile, launch bool) (backend, error) {
 	switch cfg.Target {
 	case "pc", "":
-		return newPCBackend(cfg.Live), nil
+		return newPCBackend(prof, cfg.Live), nil
 
 	case "android":
 		dev, err := android.Open(cfg.ADBPath, cfg.Serial)
@@ -129,7 +185,7 @@ func openBackend(cfg config.Config, launch bool) (backend, error) {
 				fmt.Printf("⚠️  %v（继续尝试抓屏）\n", err)
 			}
 		}
-		return newADBBackend(dev, cfg.Live), nil
+		return newADBBackend(dev, prof, cfg.Live), nil
 
 	default:
 		return nil, fmt.Errorf("未知 -target %q（可选 pc | android）", cfg.Target)

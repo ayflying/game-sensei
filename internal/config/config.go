@@ -61,6 +61,19 @@ type Config struct {
 	// DemoColor 是否同时保存老师看到的彩色帧（便于人工复核，占空间）。
 	DemoColor bool
 
+	// ---- 游戏档案（internal/game） ----
+	//
+	// Game 指定当前要玩的游戏档案：档案名（如 nrc、pc_generic）或 JSON 路径。
+	//
+	// 档案回答四个问题：怎么移动（虚拟摇杆/十字键/WASD）、摇杆在哪、
+	// 有哪些命名按钮、有哪些界面先验。它把「跨游戏通用的语义动作」
+	// 翻译成「这台设备上的具体操作」，因此**换游戏只需换一份档案**，
+	// 动作空间、提示词模板与决策代码都不动。
+	//
+	// 留空则不带任何游戏知识：只能做 TAP/SWIPE/HOLD/KEY/WAIT，
+	// MOVE 与 PRESS 会明确报错（而不是瞎猜一个坐标去点）。
+	Game string
+
 	// ---- Android（ADB）后端 ----
 
 	// Target 控制目标："pc" 驱动本机键鼠（默认）；"android" 通过 ADB 遥控手机。
@@ -98,6 +111,8 @@ func Default() Config {
 		DemoWait:  2 * time.Second,
 		DemoOut:   "",
 		DemoColor: false,
+
+		Game: "",
 
 		Target:     "pc",
 		ADBPath:    "",

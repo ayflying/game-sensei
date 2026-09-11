@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ayflying/game-sensei/internal/agent"
+	"github.com/ayflying/game-sensei/internal/game"
 )
 
 // 这是本轮最关键的回归测试：顶层 think 字段必须真的下发。
@@ -86,23 +87,59 @@ func TestChat下发顶层think(t *testing.T) {
 	}
 }
 
-func TestBuildDemoPrompt(t *testing.T) {
+// 带游戏档案时，提示词必须由**档案**驱动：游戏名、界面先验、可用动作子集
+// 全部来自 Profile。这是「不为单一游戏设计」的回归测试——
+// 一旦有人把某款游戏的文案硬编码回本包，这条会立刻红。
+func TestBuildDemoPrompt_带档案(t *testing.T) {
+	prof, err := game.Load("nrc")
+	if err != nil {
+		t.Fatalf("加载 nrc 档案失败: %v", err)
+	}
 	d := &Demonstrator{
-		Goal:  "抓到一只水系精灵",
-		Hints: []string{"虚拟摇杆中心约在 x=0.21 y=0.69"},
+		Profile: prof,
+		Goal:    "抓到一只水系精灵",
+		Hints:   []string{"现场补充的先验"},
 	}
 	p := d.BuildDemoPrompt()
 
 	for _, want := range []string{
-		"洛克王国：世界", "抓到一只水系精灵", "虚拟摇杆中心",
-		"ACTION TAP", "ACTION JOYSTICK", "0~1",
+		"洛克王国：世界", // 游戏名来自档案
+		"抓到一只水系精灵",
+		"现场补充的先验",      // 临时先验要合并进去
+		"虚拟摇杆",         // 档案里的界面先验
+		"ACTION MOVE",  // 档案配了移动 → 列出
+		"ACTION PRESS", // 档案配了按钮 → 列出
+		"star",         // 按钮名
+		"0~1",
 	} {
 		if !strings.Contains(p, want) {
-			t.Errorf("提示词缺少 %q", want)
+			t.Errorf("提示词缺少 %q\n---\n%s", want, p)
 		}
+	}
+	// 摇杆四坐标写法绝不能出现在提示词里：实测模型会纠结其语义到打满预算
+	if strings.Contains(p, "JOYSTICK") {
+		t.Error("提示词不该出现 JOYSTICK 写法")
 	}
 	if strings.Contains(p, "【本次评估】") {
 		t.Error("出动作提示词不应带评估模板")
+	}
+}
+
+// 没有档案时也要能跑，但动作空间必须收窄：不列 MOVE/PRESS。
+// 没有可信坐标就列 PRESS，只会让模型瞎按。
+func TestBuildDemoPrompt_无档案(t *testing.T) {
+	d := &Demonstrator{Goal: "探索地图"}
+	p := d.BuildDemoPrompt()
+	for _, want := range []string{"ACTION TAP", "ACTION WAIT", "0~1"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("通用协议缺少 %q", want)
+		}
+	}
+	if strings.Contains(p, "ACTION MOVE") {
+		t.Error("无档案时不该列出 MOVE（不知道摇杆在哪）")
+	}
+	if strings.Contains(p, "ACTION PRESS") {
+		t.Error("无档案时不该列出 PRESS（没有可信按钮坐标）")
 	}
 }
 

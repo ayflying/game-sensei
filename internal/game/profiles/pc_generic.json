@@ -1,0 +1,17 @@
+{
+  "name": "通用 PC 键鼠游戏",
+  "orientation": "landscape",
+  "move": {
+    "mode": "keys",
+    "keys": {
+      "up": "w",
+      "down": "s",
+      "left": "a",
+      "right": "d"
+    }
+  },
+  "hints": [
+    "PC 上用键盘移动：W 前、S 后、A 左、D 右",
+    "鼠标用于转视角或点击界面；转视角用 SWIPE 拖动屏幕"
+  ]
+}

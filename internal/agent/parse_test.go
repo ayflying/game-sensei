@@ -239,12 +239,198 @@ func TestExplainAction(t *testing.T) {
 }
 
 func TestActionProtocol(t *testing.T) {
-	p := ActionProtocol()
+	// 通用部分：不带档案时也要能给出基础动作说明
+	p := ActionProtocol(ProtocolOptions{})
 	for _, want := range []string{"ACTION TAP", "ACTION SWIPE", "ACTION HOLD",
-		"ACTION JOYSTICK", "ACTION KEY", "ACTION WAIT"} {
+		"ACTION KEY", "ACTION WAIT"} {
 		if !contains(p, want) {
 			t.Errorf("ActionProtocol() 缺少 %q", want)
 		}
+	}
+	// 没配移动/按钮时不该列出 MOVE / PRESS：
+	// 让模型看见的动作空间越小越准，列了它就会去用做不了的动作。
+	if contains(p, "ACTION MOVE") {
+		t.Error("未配置移动时不该列出 MOVE")
+	}
+	if contains(p, "ACTION PRESS") {
+		t.Error("未配置按钮时不该列出 PRESS")
+	}
+	// 协议里绝不能出现摇杆四坐标：实测模型会在 cx/cy/tx/ty 的语义上
+	// 纠结到打满思考预算（74s）仍给不出动作。
+	if contains(p, "JOYSTICK") {
+		t.Error("协议里不该出现 JOYSTICK 写法（实测会让模型陷入参数语义纠结）")
+	}
+}
+
+func TestActionProtocol_带档案(t *testing.T) {
+	p := ActionProtocol(ProtocolOptions{
+		Hints:    []string{"左下角是虚拟摇杆"},
+		Buttons:  []string{"jump(跳跃)", "attack(攻击)"},
+		HasMove:  true,
+		MoveNote: "虚拟摇杆，位置固定在屏幕左下",
+	})
+	for _, want := range []string{"ACTION MOVE", "ACTION PRESS", "jump(跳跃)", "虚拟摇杆"} {
+		if !contains(p, want) {
+			t.Errorf("带档案的协议缺少 %q", want)
+		}
+	}
+}
+
+// 提示词里的示例必须写成占位符。踩过的坑：早期示例写了具体坐标
+// （ACTION JOYSTICK cx=0.21 cy=0.69 ...），模型逐字节照抄这一行当答案，
+// 8 步实况动作完全一致——看着像「模型不会决策」，实际是「把示例当答案抄了」。
+func TestActionProtocol_不含可照抄的具体数字(t *testing.T) {
+	p := ActionProtocol(ProtocolOptions{HasMove: true, Buttons: []string{"jump"}})
+	for _, bad := range []string{"0.21", "0.69", "0.81", "1200"} {
+		if contains(p, bad) {
+			t.Errorf("协议里出现了可被照抄的具体数字 %q", bad)
+		}
+	}
+	if !contains(p, "<") {
+		t.Error("协议应使用尖括号占位符")
+	}
+}
+
+func TestParseAction_Move方向(t *testing.T) {
+	cases := []struct {
+		in   string
+		dir  Dir
+		dur  time.Duration
+		desc string
+	}{
+		{"ACTION MOVE dir=up dur=800", DirUp, 800 * time.Millisecond, "键值对写法"},
+		{"ACTION MOVE dir=前", DirUp, DefaultMoveMs * time.Millisecond, "中文方向 + 默认时长"},
+		{"action move dir=UP_LEFT", DirUpLeft, DefaultMoveMs * time.Millisecond, "大小写不敏感"},
+		{"ACTION MOVE dir=up-left dur=500", DirUpLeft, 500 * time.Millisecond, "连字符写法"},
+		{"ACTION MOVE forward", DirUp, DefaultMoveMs * time.Millisecond, "省略 dir= 且不带时长"},
+		{"移动 方向=右", DirRight, DefaultMoveMs * time.Millisecond, "中文动词"},
+	}
+	for _, c := range cases {
+		got, err := ParseAction(c.in)
+		if err != nil {
+			t.Errorf("%s: ParseAction(%q) 意外报错: %v", c.desc, c.in, err)
+			continue
+		}
+		if got.Kind != ActionMove {
+			t.Errorf("%s: Kind=%v, 期望 ActionMove", c.desc, got.Kind)
+			continue
+		}
+		if got.Dir != c.dir {
+			t.Errorf("%s: Dir=%q, 期望 %q", c.desc, got.Dir, c.dir)
+		}
+		if got.Dur != c.dur {
+			t.Errorf("%s: Dur=%v, 期望 %v", c.desc, got.Dur, c.dur)
+		}
+	}
+}
+
+// 无方向的 MOVE 不能瞎猜成某个方向——那会让角色自己走起来。
+func TestParseAction_Move缺方向应拒绝(t *testing.T) {
+	for _, in := range []string{"ACTION MOVE", "ACTION MOVE dur=800", "移动"} {
+		if _, err := ParseAction(in); !errors.Is(err, ErrNoAction) {
+			t.Errorf("ParseAction(%q) 应返回 ErrNoAction", in)
+		}
+	}
+}
+
+func TestParseAction_Move非法方向应拒绝(t *testing.T) {
+	for _, in := range []string{"ACTION MOVE dir=towards", "ACTION MOVE dir=斜着"} {
+		if _, err := ParseAction(in); !errors.Is(err, ErrNoAction) {
+			t.Errorf("ParseAction(%q) 非法方向应拒绝", in)
+		}
+	}
+}
+
+// L2 的鼠标相对移动是保留能力：MOVE dx/dy 仍认，但降级成 ActionMouseMove，
+// 不会和 L1 的方向移动混淆。
+func TestParseAction_Move回退到鼠标位移(t *testing.T) {
+	got, err := ParseAction("ACTION MOVE dx=10 dy=-5")
+	if err != nil {
+		t.Fatalf("意外报错: %v", err)
+	}
+	if got.Kind != ActionMouseMove {
+		t.Fatalf("Kind=%v, 期望 ActionMouseMove", got.Kind)
+	}
+	if got.Dx != 10 || got.Dy != -5 {
+		t.Errorf("位移 = %d,%d, 期望 10,-5", got.Dx, got.Dy)
+	}
+}
+
+func TestParseAction_Press按钮(t *testing.T) {
+	cases := []struct {
+		in   string
+		name string
+	}{
+		{"ACTION PRESS name=jump", "jump"},
+		{"ACTION PRESS jump", "jump"},
+		{"action press btn=Attack", "attack"},
+		{"ACTION BUTTON name=星形", "星形"},
+		{"按下 按钮=jump", "jump"},
+	}
+	for _, c := range cases {
+		got, err := ParseAction(c.in)
+		if err != nil {
+			t.Errorf("ParseAction(%q) 意外报错: %v", c.in, err)
+			continue
+		}
+		if got.Kind != ActionPress {
+			t.Errorf("ParseAction(%q) Kind=%v, 期望 ActionPress", c.in, got.Kind)
+			continue
+		}
+		if got.Name != c.name {
+			t.Errorf("ParseAction(%q) Name=%q, 期望 %q", c.in, got.Name, c.name)
+		}
+	}
+}
+
+// 没有按钮名的 PRESS 不能当成「按了个空按钮」，纯数字也不是按钮名。
+func TestParseAction_Press缺名字应拒绝(t *testing.T) {
+	for _, in := range []string{"ACTION PRESS", "ACTION PRESS name=", "ACTION PRESS 123"} {
+		if _, err := ParseAction(in); !errors.Is(err, ErrNoAction) {
+			t.Errorf("ParseAction(%q) 应返回 ErrNoAction", in)
+		}
+	}
+}
+
+func TestParseAction_无坐标叙述仍应拒绝(t *testing.T) {
+	// 加了 MOVE/PRESS 之后，原有的「叙述行不能被当动作」的保证必须仍然成立
+	bad := []string{
+		"ACTION TAP x=0.5",
+		"摇杆: x=0.21 y=0.69",
+		"建议: 点击右下角的交互按钮",
+		"方向: up",
+	}
+	for _, in := range bad {
+		if _, err := ParseAction(in); !errors.Is(err, ErrNoAction) {
+			t.Errorf("ParseAction(%q) 应返回 ErrNoAction", in)
+		}
+	}
+}
+
+func TestActionString_新动作(t *testing.T) {
+	cases := []struct {
+		act  Action
+		want string
+	}{
+		{Action{Kind: ActionMove, Dir: DirUp}, "move:up"},
+		{Action{Kind: ActionMove, Dir: DirUpLeft, Dur: 800 * time.Millisecond}, "move:up_left/800ms"},
+		{Action{Kind: ActionPress, Name: "jump"}, "press:jump"},
+		{Action{Kind: ActionMouseMove, Dx: 10, Dy: -5}, "mouse:+10,-5"},
+		{Action{Kind: ActionKey, Code: "w", Dur: 500 * time.Millisecond}, "key:w/500ms"},
+	}
+	for _, c := range cases {
+		if got := c.act.String(); got != c.want {
+			t.Errorf("String() = %q, 期望 %q", got, c.want)
+		}
+	}
+}
+
+func TestExplainAction_新动作(t *testing.T) {
+	if s := ExplainAction(Action{Kind: ActionMove, Dir: DirUpLeft, Dur: time.Second}); s == "" {
+		t.Error("MOVE 的说明为空")
+	}
+	if s := ExplainAction(Action{Kind: ActionPress, Name: "jump"}); !contains(s, "jump") {
+		t.Errorf("PRESS 的说明应含按钮名，实际 %q", s)
 	}
 }
 

@@ -18,6 +18,13 @@ import (
 	"github.com/ayflying/game-sensei/internal/vision"
 )
 
+// maxFailStreak 是连续执行失败的容忍上限。
+//
+// 偶发一次失败不该中断整段示范——已经采到的数据是真金白银；
+// 但连续失败说明配置或链路坏了（例如档案里没有模型给的那个按钮），
+// 继续跑只是在刷屏，早停早排查。
+const maxFailStreak = 5
+
 // runDemo 是「老师在线示范」回路（Phase 2 的第一块）。
 //
 // 与 Phase 1 的 teachLoop 有本质区别：
@@ -69,7 +76,7 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-ch
 	}
 	fmt.Println()
 
-	var parsedOK, applied int
+	var parsedOK, applied, failStreak int
 	var prevAction string
 	for step := 1; ; step++ {
 		select {
@@ -122,23 +129,45 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-ch
 				progress(step, steps), info.LatencyMs/1000, oneLine(res.Raw, 80))
 		} else {
 			parsedOK++
-			// 4) 执行。dry-run 时后端会吞掉动作，但日志照打，便于先空跑验证。
-			if err := be.Apply(act); err != nil {
-				return fmt.Errorf("第 %d 步执行动作失败: %w", step, err)
-			}
-			applied++
+			// 4) 展开 + 执行。
+			//
+			// 先单独展开一次只为日志：把「朝前走」显示成
+			// 「摇杆 0.21,0.69 推向 0.21,0.61」，排查动作对不对时这行信息量最大。
+			// （Apply 内部还会再展开一次，展开是纯计算，代价可忽略。）
+			expanded, expErr := be.Resolve(act)
+			// 无论成功与否都告诉老师「你刚给的是这个动作」，
+			// 否则失败的动作下一轮还会被重复提出。
 			prevAction = act.String()
-			mark := "执行"
-			if !be.Live() {
-				mark = "dry-run"
+
+			if expErr != nil {
+				// 展开失败通常是配置问题：档案里没有这个按钮、斜向没配键位。
+				failStreak++
+				fmt.Printf("[%s] ⚠️  动作无法执行: %v\n", progress(step, steps), expErr)
+				if failStreak >= maxFailStreak {
+					return fmt.Errorf("连续 %d 步动作无法执行，最后错误: %w", failStreak, expErr)
+				}
+			} else if err := be.Apply(act); err != nil {
+				failStreak++
+				fmt.Printf("[%s] ⚠️  执行失败: %v\n", progress(step, steps), err)
+				if failStreak >= maxFailStreak {
+					return fmt.Errorf("连续 %d 步执行失败，最后错误: %w", failStreak, err)
+				}
+			} else {
+				failStreak = 0
+				applied++
+				mark := "执行"
+				if !be.Live() {
+					mark = "dry-run"
+				}
+				repeat := ""
+				if step > 1 && act.String() == info.PrevAction {
+					repeat = " ⚠️与上一步相同"
+				}
+				// L1 → L2 都打出来：左边是模型的意图，右边是最终落到设备上的操作
+				fmt.Printf("[%s] %s %-20s → %-28s | %s | %.1fs %dtok%s\n",
+					progress(step, steps), mark, act.String(), expanded.String(),
+					agent.ExplainAction(act), info.LatencyMs/1000, info.OutTokens, repeat)
 			}
-			repeat := ""
-			if step > 1 && act.String() == info.PrevAction {
-				repeat = " ⚠️与上一步相同"
-			}
-			fmt.Printf("[%s] %s %-34s | %s | %.1fs %dtok%s\n",
-				progress(step, steps), mark, act.String(),
-				agent.ExplainAction(act), info.LatencyMs/1000, info.OutTokens, repeat)
 		}
 
 		// 5) 落样。解析失败也存：这是衡量老师输出稳定性的原始数据。
