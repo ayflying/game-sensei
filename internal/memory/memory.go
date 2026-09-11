@@ -16,14 +16,14 @@ import (
 
 // Record 是一帧的轨迹摘要。
 type Record struct {
-	FrameNo   int64         // 帧序号
-	At        time.Time     // 采集时刻
-	CaptureMs float64       // 截屏耗时
-	DecideMs  float64       // 决策耗时
-	InputMs   float64       // 输入耗时
-	TotalMs   float64       // 单帧总耗时
-	Action    agent.Action  // 输出的动作
-	GrayMean  uint8         // 帧平均亮度（摘要，非原始像素）
+	FrameNo   int64        // 帧序号
+	At        time.Time    // 采集时刻
+	CaptureMs float64      // 截屏耗时
+	DecideMs  float64      // 决策耗时
+	InputMs   float64      // 输入耗时
+	TotalMs   float64      // 单帧总耗时
+	Action    agent.Action // 输出的动作
+	GrayMean  uint8        // 帧平均亮度（摘要，非原始像素）
 }
 
 // Buffer 是并发安全的环形轨迹缓冲。

@@ -6,9 +6,11 @@
 // 后续按游戏动作空间扩展；所有真实发送受 Config.Live 开关保护（默认 dry-run）。
 //
 // 关键点（Win32 SendInput x64 结构布局）：
-//   MOUSEINPUT  = LONG*2 + DWORD*3 + ULONG_PTR = 32 字节（含对齐 padding）
-//   KEYBDINPUT  = WORD*2 + DWORD*2 + ULONG_PTR = 24 字节
-//   INPUT       = DWORD type + 4 字节对齐 + union(32) = 40 字节
+//
+//	MOUSEINPUT  = LONG*2 + DWORD*3 + ULONG_PTR = 32 字节（含对齐 padding）
+//	KEYBDINPUT  = WORD*2 + DWORD*2 + ULONG_PTR = 24 字节
+//	INPUT       = DWORD type + 4 字节对齐 + union(32) = 40 字节
+//
 // cbSize 必须传 unsafe.Sizeof(INPUT)，结构逐字节错位会导致 SendInput 静默失败。
 // 本文件底部有编译期断言把尺寸钉死。
 package input

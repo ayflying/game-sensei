@@ -82,7 +82,7 @@ game-sensei/
 │   ├── capture/              # 截屏（GDI BitBlt → 灰度降采样，纯 syscall）
 │   ├── agent/                # Actor 接口 + 规则学生（后续换量化 ONNX 实现）
 │   ├── input/                # 键鼠（user32!SendInput，纯 syscall）
-│   ├── teacher/              # Ollama HTTP 客户端 + 评估/示范提示词（Phase 1）
+│   ├── teacher/              # Ollama 客户端 + 轨迹评估器 + 提示词（Phase 1 已落地）
 │   ├── memory/               # 轨迹缓冲
 │   └── config/               # 帧率/降采样/动作集（按游戏可配）
 ├── models/                   # *.onnx（trainer 导出，运行时热载，不入库）
@@ -104,6 +104,9 @@ game-sensei/
 
 - **Phase 0**：单游戏打通「截屏 → 学生 stub 决策 → 键鼠」实时回路（先用规则驱动验证延迟与输入链路）。见 `cmd/helper/main.go` 占位。
 - **Phase 1**：接 `teacher`，先做**离线评估 + 文字反馈**，人工看反馈改进提示词，验证老师判断力。
+  ✅ **第一版已落地**：`internal/teacher` 提供 Ollama `/api/chat` 客户端（多图送审、content/thinking 双字段兜底）、
+  轨迹评估器（结构化反馈 + 评分解析 + Markdown 报告）与提示词构造；`cmd/helper -teacher` 开启异步教学回路，
+  抽样抓帧不阻塞实时回路。已用本机 `qwen3.5:2b` 端到端验证通过（详见 §9.2）。
 - **Phase 2**：老师产出**示范轨迹**，自动用示范微调学生（蒸馏 / bootstrapping），打通 `trainer/`。
 - **Phase 3**：自动化飞轮——老师定期评估 + 选优轨迹 + 触发微调 + 回灌，形成自学习；**泛型化**（换游戏只需换目标定义 + 初始示范）。
 
@@ -177,6 +180,43 @@ python tools/vlm_bench.py --image shot.png --models qwen3.5:2b --rounds 2
 - `think=false` 参数在本机 Ollama 0.34.0 上对这两个模型**无效**，压不住思考。
 - 同一模型在不同机器上速度差异极大（`qwen3-vl:2b` 远程 16~27 tok/s vs 本机 147 tok/s），
   **teacher 选型必须以目标机器实测为准**。
+
+### 9.2 老师（异步教学回路）
+
+实时回路只管跑，老师在**另一个协程**里按抽样节奏干活：
+
+```bash
+# 边跑边让老师查岗（dry-run，不发送真实键鼠）
+go run ./cmd/helper -frames 3000 -teacher \
+  -teacher-model qwen3.5:9b \
+  -eval-every 300 -eval-frames 6 -eval-width 640 \
+  -goal "把方块推到右侧终点" \
+  -eval-out .workbuddy/eval-reports
+```
+
+| 参数 | 说明 |
+|---|---|
+| `-teacher` | 启用异步教学回路（默认关，避免无人值守时白烧算力） |
+| `-teacher-url` / `-teacher-model` | 老师地址与模型，默认本机 `11435` + `qwen3.5:9b` |
+| `-eval-every` | 每 N 帧抽一帧；30FPS 下 `300` ≈ 每 10 秒一帧 |
+| `-eval-frames` | 攒够多少帧送审一次（`6` ≈ 覆盖 1 分钟） |
+| `-eval-width` | 送审帧降采样宽度（`640`，比学生输入的 160 宽，让老师看清界面） |
+| `-goal` | 游戏目标，写进提示词供老师判断动作合理性 |
+| `-eval-out` | 报告落盘目录（Markdown，含评分与性能数据）；空则只打印控制台 |
+
+**设计要点：**
+
+- 抽帧与推理全在**教学协程**内完成（`capture.Grab` 无共享状态，可跨协程调用），
+  实时回路每帧只是往缓冲通道做一次**非阻塞投递**，教学回路忙时直接丢帧——
+  实测 40 帧运行中实时回路平均延迟 31.0ms，与不启用老师时一致。
+- 老师不可达时**优雅降级**：启动自检失败只打印警告，实时回路照跑。
+- 送审的是**学生自己的观测**（降采样灰度图），不是原始彩屏——评估的是
+  「学生在它看到的世界里做得对不对」。
+- 反馈要求结构化四行（局面 / 评价 / 建议 / 评分），评分会被解析出来便于 Phase 2 自动选优。
+
+**端到端验证（本机 `qwen3.5:2b`，workbuddy 桌面为「游戏画面」）：** 老师 12.7s 返回，
+正确指出「画面是聊天界面而非游戏主画面」，给出关闭窗口→进入游戏→再推方块的建议，评分 0；
+报告落盘正常。`internal/teacher` 另有 mock 单测覆盖双字段兜底、图片编码、超时与错误路径。
 
 ---
 

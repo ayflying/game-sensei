@@ -25,7 +25,7 @@ var (
 	procGetDeviceCaps        = gdi32.NewProc("GetDeviceCaps")
 	procCreateCompatibleDC   = gdi32.NewProc("CreateCompatibleDC")
 	procCreateCompatibleBitm = gdi32.NewProc("CreateCompatibleBitmap")
-	procSelectObject           = gdi32.NewProc("SelectObject")
+	procSelectObject         = gdi32.NewProc("SelectObject")
 	procBitBlt               = gdi32.NewProc("BitBlt")
 	procGetDIBits            = gdi32.NewProc("GetDIBits")
 	procDeleteDC             = gdi32.NewProc("DeleteDC")
@@ -36,25 +36,25 @@ const (
 	horzRes = 8  // GetDeviceCaps: 桌面宽度（像素）
 	vertRes = 10 // GetDeviceCaps: 桌面高度（像素）
 
-	srccopy          = 0x00CC0020 // BitBlt 光栅操作：直接复制
-	dibRgbWindows    = 0          // BITMAPINFO 使用 Windows V4 头（此处用 V3，值为 0）
-	biRgb            = 0          // 未压缩
-	dibItOpBottomUp  = 0          // 按 DIB 自带方向读取
+	srccopy         = 0x00CC0020 // BitBlt 光栅操作：直接复制
+	dibRgbWindows   = 0          // BITMAPINFO 使用 Windows V4 头（此处用 V3，值为 0）
+	biRgb           = 0          // 未压缩
+	dibItOpBottomUp = 0          // 按 DIB 自带方向读取
 )
 
 // bitmapInfoHeader 对应 Win32 BITMAPINFOHEADER（40 字节）。
 type bitmapInfoHeader struct {
-	Size          uint32
-	Width         int32
-	Height        int32 // 负值 = top-down（第一行对应屏幕顶部）
-	Planes        uint16
-	BitCount      uint16
-	Compression   uint32
-	SizeImage     uint32
-	XPPelMeter    int32
-	YPelMeter     int32
-	ClrUsed       uint32
-	ClrImportant  uint32
+	Size         uint32
+	Width        int32
+	Height       int32 // 负值 = top-down（第一行对应屏幕顶部）
+	Planes       uint16
+	BitCount     uint16
+	Compression  uint32
+	SizeImage    uint32
+	XPPelMeter   int32
+	YPelMeter    int32
+	ClrUsed      uint32
+	ClrImportant uint32
 }
 
 // Bounds 返回主屏尺寸。
