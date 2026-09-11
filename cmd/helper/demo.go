@@ -1,0 +1,209 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"image"
+	"image/png"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/ayflying/game-sensei/internal/agent"
+	"github.com/ayflying/game-sensei/internal/config"
+	"github.com/ayflying/game-sensei/internal/dataset"
+	"github.com/ayflying/game-sensei/internal/teacher"
+	"github.com/ayflying/game-sensei/internal/vision"
+)
+
+// runDemo 是「老师在线示范」回路（Phase 2 的第一块）。
+//
+// 与 Phase 1 的 teachLoop 有本质区别：
+//   - teachLoop 在**旁路**观察学生，只产出评语，不影响游戏；
+//   - runDemo 直接**驱动**游戏，每一步都是老师看着画面给出的动作，
+//     同时把这些 (学生观测, 老师动作) 对存成示范数据集，供后续蒸馏学生。
+//
+// 节拍由老师推理速度决定（实测 qwen3.5:9b 关思考后约 1.2s/步），
+// 动作之间再留 DemoWait 让游戏把状态变完——否则下一帧拍的还是旧画面，
+// 老师会基于「没变的画面」重复下同一个动作。
+func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-chan os.Signal) error {
+	sw, sh, err := be.Size()
+	if err != nil {
+		return fmt.Errorf("获取屏幕尺寸失败: %w", err)
+	}
+
+	dir := cfg.DemoOut
+	if dir == "" {
+		dir = filepath.Join(".workbuddy", "demos", time.Now().Format("20060102-150405"))
+	}
+	w, err := dataset.NewWriter(dir, dataset.Meta{
+		Goal:      cfg.Goal,
+		Model:     cfg.TeacherModel,
+		Backend:   be.Describe(),
+		ScreenW:   sw,
+		ScreenH:   sh,
+		DownWidth: cfg.DownsampleWidth,
+		DemoWidth: cfg.DemoWidth,
+		Live:      be.Live(),
+	})
+	if err != nil {
+		return err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = w.Close()
+		}
+	}()
+
+	steps := cfg.DemoSteps
+	if steps > 0 {
+		fmt.Printf("示范数据: %s | 计划 %d 步 | 每步等待 %v\n", w.Dir(), steps, cfg.DemoWait)
+	} else {
+		fmt.Printf("示范数据: %s | 不限步数（Ctrl+C 退出）| 每步等待 %v\n", w.Dir(), cfg.DemoWait)
+	}
+	if cfg.DemoColor {
+		fmt.Println("同时保存老师彩色帧到 color/（用于人工复核）")
+	}
+	fmt.Println()
+
+	var parsedOK, applied int
+	var prevAction string
+	for step := 1; ; step++ {
+		select {
+		case <-stop:
+			fmt.Println("\n收到退出信号，正在收尾…")
+			return finishDemo(w, &closed, parsedOK, applied)
+		default:
+		}
+		if steps > 0 && step > steps {
+			return finishDemo(w, &closed, parsedOK, applied)
+		}
+
+		// 1) 感知：灰度图是「学生观测」，彩色图是「老师视野」。
+		//    Android 后端下两次调用共用同一张截图缓存，不会多截一次。
+		gray, err := be.Grab(cfg.DownsampleWidth)
+		if err != nil {
+			return fmt.Errorf("第 %d 步抓取灰度帧失败: %w", step, err)
+		}
+		color, err := be.GrabColor()
+		if err != nil {
+			return fmt.Errorf("第 %d 步抓取彩色帧失败: %w", step, err)
+		}
+		// 2) 降采样 + JPEG 编码后送审。JPEG 而非 PNG：1024 宽下 130KB vs 1.5MB。
+		small := vision.Downscale(color, cfg.DemoWidth)
+		jpg, err := vision.EncodeJPEG(small, 88)
+		if err != nil {
+			return fmt.Errorf("第 %d 步编码送审帧失败: %w", step, err)
+		}
+		grayPNG := encodeGrayPNG(gray)
+
+		// 3) 问老师。超时按「本步失败」处理，不中断整段示范——
+		//    偶发一次超时不该让已经采到的数据全废。
+		dem.PrevAction = prevAction // 把上一步喂回去，否则老师会无限重复同一动作
+		act, res, actErr := askTeacher(cfg, dem, jpg)
+
+		info := dataset.StepInfo{Raw: "", LatencyMs: 0, PrevAction: prevAction}
+		if res != nil {
+			info.Raw = res.Raw
+			info.Parsed = res.Used
+			if res.Reply != nil {
+				info.LatencyMs = res.Reply.Stats.TotalMs
+				info.OutTokens = res.Reply.Stats.OutputTokens
+			}
+		}
+
+		if actErr != nil {
+			fmt.Printf("[%s] ⚠️  老师无响应: %v\n", progress(step, steps), actErr)
+		} else if !res.Used {
+			fmt.Printf("[%s] ⚠️  动作解析失败（%.1fs）| 原始输出: %s\n",
+				progress(step, steps), info.LatencyMs/1000, oneLine(res.Raw, 80))
+		} else {
+			parsedOK++
+			// 4) 执行。dry-run 时后端会吞掉动作，但日志照打，便于先空跑验证。
+			if err := be.Apply(act); err != nil {
+				return fmt.Errorf("第 %d 步执行动作失败: %w", step, err)
+			}
+			applied++
+			prevAction = act.String()
+			mark := "执行"
+			if !be.Live() {
+				mark = "dry-run"
+			}
+			repeat := ""
+			if step > 1 && act.String() == info.PrevAction {
+				repeat = " ⚠️与上一步相同"
+			}
+			fmt.Printf("[%s] %s %-34s | %s | %.1fs %dtok%s\n",
+				progress(step, steps), mark, act.String(),
+				agent.ExplainAction(act), info.LatencyMs/1000, info.OutTokens, repeat)
+		}
+
+		// 5) 落样。解析失败也存：这是衡量老师输出稳定性的原始数据。
+		if err := w.Step(act, info, grayPNG, jpg, cfg.DemoColor); err != nil {
+			return fmt.Errorf("第 %d 步写示范数据失败: %w", step, err)
+		}
+
+		// 6) 等游戏响应。
+		select {
+		case <-stop:
+			return finishDemo(w, &closed, parsedOK, applied)
+		case <-time.After(cfg.DemoWait):
+		}
+	}
+}
+
+// askTeacher 包一层超时；保持 runDemo 主循环干净。
+func askTeacher(cfg config.Config, dem *teacher.Demonstrator, jpg []byte) (agent.Action, *teacher.DemoResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.EvalTimeout)
+	defer cancel()
+	res, err := dem.Act(ctx, jpg)
+	if err != nil {
+		return agent.Action{Kind: agent.ActionNone}, nil, err
+	}
+	return res.Action, res, nil
+}
+
+func finishDemo(w *dataset.Writer, closed *bool, parsedOK, applied int) error {
+	if err := w.Close(); err != nil {
+		return err
+	}
+	*closed = true
+	fmt.Printf("\n示范结束：解析成功 %d 步，实际执行 %d 步\n", parsedOK, applied)
+	fmt.Printf("数据已保存到: %s\n", w.Dir())
+	fmt.Printf("  meta.json        会话元信息与统计\n")
+	fmt.Printf("  trajectory.jsonl 逐样本动作（trainer/ 的输入）\n")
+	fmt.Printf("  frames/          学生观测灰度帧\n")
+	return nil
+}
+
+// encodeGrayPNG 把学生观测编码为 PNG。灰度 160 宽时只有几十 KB，
+// 用 PNG 是为了无损——训练数据不该引入 JPEG 块效应。
+func encodeGrayPNG(g *image.Gray) []byte {
+	if g == nil {
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, g); err != nil {
+		return nil
+	}
+	return buf.Bytes()
+}
+
+// progress 生成进度标签：限定步数时显示 "3/20"，不限时只显示 "3"。
+func progress(step, total int) string {
+	if total > 0 {
+		return fmt.Sprintf("%2d/%d", step, total)
+	}
+	return fmt.Sprintf("%2d", step)
+}
+
+func oneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
+}

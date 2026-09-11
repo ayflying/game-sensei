@@ -72,43 +72,45 @@ func Bounds() (image.Rectangle, error) {
 	return image.Rect(0, 0, int(w), int(h)), nil
 }
 
-// Grab 抓取整个主屏并返回灰度图；若 downWidth>0 则等比降采样到该宽度。
-// 输出 pixel 为 image.Gray（单通道），直接可作为学生网络输入的前体。
-func Grab(downWidth int) (*image.Gray, error) {
+// grabBGRA 抓取整个主屏，返回 top-down 的 32bpp BGRA 原始字节与宽高。
+//
+// 抽出来是为了让灰度（学生观测）与彩色（老师 VLM 判读）两条路共用同一份
+// BitBlt/GetDIBits 逻辑——两边各写一遍最容易出现「一个改了另一个忘了」。
+func grabBGRA() ([]byte, int, int, error) {
 	rect, err := Bounds()
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	w, h := rect.Dx(), rect.Dy()
 
 	screenDC, _, err := procGetDC.Call(0)
 	if screenDC == 0 {
-		return nil, wrapCallError("GetDC", err)
+		return nil, 0, 0, wrapCallError("GetDC", err)
 	}
 	defer procReleaseDC.Call(0, screenDC)
 
 	memDC, _, err := procCreateCompatibleDC.Call(screenDC)
 	if memDC == 0 {
-		return nil, wrapCallError("CreateCompatibleDC", err)
+		return nil, 0, 0, wrapCallError("CreateCompatibleDC", err)
 	}
 	defer procDeleteDC.Call(memDC)
 
 	bmp, _, err := procCreateCompatibleBitm.Call(screenDC, uintptr(w), uintptr(h))
 	if bmp == 0 {
-		return nil, wrapCallError("CreateCompatibleBitmap", err)
+		return nil, 0, 0, wrapCallError("CreateCompatibleBitmap", err)
 	}
 	defer procDeleteObject.Call(bmp)
 
 	oldObj, _, err := procSelectObject.Call(memDC, bmp)
 	if oldObj == 0 {
-		return nil, wrapCallError("SelectObject", err)
+		return nil, 0, 0, wrapCallError("SelectObject", err)
 	}
 	defer procSelectObject.Call(memDC, oldObj)
 
 	// 屏幕 (0,0,w,h) -> 内存位图 (0,0)
 	ret, _, err := procBitBlt.Call(memDC, 0, 0, uintptr(w), uintptr(h), screenDC, 0, 0, srccopy)
 	if ret == 0 {
-		return nil, wrapCallError("BitBlt", err)
+		return nil, 0, 0, wrapCallError("BitBlt", err)
 	}
 
 	// top-down 32bpp BGRA，避免手动翻转行序
@@ -127,10 +129,39 @@ func Grab(downWidth int) (*image.Gray, error) {
 		dibItOpBottomUp,
 	)
 	if ret == 0 {
-		return nil, wrapCallError("GetDIBits", err)
+		return nil, 0, 0, wrapCallError("GetDIBits", err)
 	}
+	return buf, w, h, nil
+}
 
+// Grab 抓取整个主屏并返回灰度图；若 downWidth>0 则等比降采样到该宽度。
+// 输出 pixel 为 image.Gray（单通道），直接可作为学生网络输入的前体。
+func Grab(downWidth int) (*image.Gray, error) {
+	buf, w, h, err := grabBGRA()
+	if err != nil {
+		return nil, err
+	}
 	return toGrayDownsampled(buf, w, h, downWidth), nil
+}
+
+// GrabColor 抓取整个主屏并返回**全分辨率**彩色图。
+//
+// 与 Grab 的用途不同：Grab 给「学生」当感知输入（灰度、极小），
+// GrabColor 给「老师」VLM 判读画面——彩色与可读细节才够它认界面元素。
+// 降采样交给调用方（internal/vision.Downscale），后端保持「只负责取像素」。
+func GrabColor() (image.Image, error) {
+	buf, w, h, err := grabBGRA()
+	if err != nil {
+		return nil, err
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	for i, j := 0, 0; i < len(buf); i, j = i+4, j+4 {
+		dst.Pix[j] = buf[i+2]   // R
+		dst.Pix[j+1] = buf[i+1] // G
+		dst.Pix[j+2] = buf[i]   // B
+		dst.Pix[j+3] = 255      // A
+	}
+	return dst, nil
 }
 
 // toGrayDownsampled 将 BGRA 字节流转为灰度图；downWidth<=0 时保持原尺寸。

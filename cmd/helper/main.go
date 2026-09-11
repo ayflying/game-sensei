@@ -12,9 +12,20 @@
 //	       [-teacher] [-teacher-url http://127.0.0.1:11435] [-teacher-model qwen3.5:9b]
 //	       [-eval-every 300] [-eval-frames 6] [-eval-width 640] [-goal "..."] [-eval-out dir]
 //	       [-target pc|android] [-adb path] [-serial sn] [-app 包名] [-launch]
+//	       [-demo] [-demo-steps 20] [-demo-width 1024] [-demo-wait 2s]
+//	       [-demo-out dir] [-demo-color] [-demo-hints "a;b"]
 //
 // 默认 dry-run（不真正发送输入），Ctrl+C 或达到 -frames 后干净退出。
 // -target android 时通过 ADB 遥控手机：截屏为感知、触摸 tap/swipe 为行动。
+//
+// 三种运行形态：
+//
+//	实时回路（默认）  capture -> 学生 -> input，固定节拍，验证延迟与输入链路；
+//	异步教学（-teacher）  旁路抽样关键帧交给老师评估，只出评语，不影响游戏；
+//	在线示范（-demo）     老师看着画面直接出动作并驱动游戏，同时把
+//	                      (学生观测, 老师动作) 存成示范数据集供后续蒸馏学生。
+//
+// -demo 由「秒级」节拍驱动（老师单次约 1~2s），与 30FPS 的实时回路互斥。
 package main
 
 import (
@@ -53,6 +64,15 @@ func main() {
 	flag.StringVar(&cfg.Goal, "goal", cfg.Goal, "游戏目标描述（写入老师提示词）")
 	flag.StringVar(&cfg.EvalOutDir, "eval-out", cfg.EvalOutDir, "评估报告落盘目录（空=仅控制台）")
 
+	// ---- Phase 2：老师在线示范 ----
+	flag.BoolVar(&cfg.Demo, "demo", cfg.Demo, "启用老师在线示范：老师看着画面出动作，并采集示范数据")
+	flag.IntVar(&cfg.DemoSteps, "demo-steps", cfg.DemoSteps, "示范步数上限（0=直到 Ctrl+C）")
+	flag.IntVar(&cfg.DemoWidth, "demo-width", cfg.DemoWidth, "送审老师的彩色帧降采样宽度（像素）")
+	flag.DurationVar(&cfg.DemoWait, "demo-wait", cfg.DemoWait, "每步动作后等待游戏响应的时间")
+	flag.StringVar(&cfg.DemoOut, "demo-out", cfg.DemoOut, "示范数据落盘目录（空=.workbuddy/demos/<时间戳>）")
+	flag.BoolVar(&cfg.DemoColor, "demo-color", cfg.DemoColor, "同时保存老师看到的彩色帧，便于人工复核")
+	demoHints := flag.String("demo-hints", "", "额外的界面先验，多条用 ; 分隔（如摇杆中心坐标）")
+
 	flag.StringVar(&cfg.Target, "target", cfg.Target, "控制目标：pc（本机键鼠）| android（ADB 遥控手机）")
 	flag.StringVar(&cfg.ADBPath, "adb", cfg.ADBPath, "adb 可执行文件路径（空=自动查找）")
 	flag.StringVar(&cfg.Serial, "serial", cfg.Serial, "ADB 设备序列号（空=取唯一在线设备）")
@@ -77,6 +97,10 @@ func main() {
 	}
 	if cfg.ReportEvery <= 0 {
 		cfg.ReportEvery = 30
+	}
+	// -demo 蕴含 -teacher：示范本身就是老师在工作，分开设只会让人漏配。
+	if cfg.Demo {
+		cfg.TeacherEnabled = true
 	}
 	tickInterval := time.Second / time.Duration(cfg.TargetFPS)
 
@@ -123,6 +147,54 @@ func main() {
 		}
 	} else {
 		fmt.Println("老师未启用（加 -teacher 开启异步教学回路）")
+	}
+
+	// ---- Phase 2：老师在线示范 ----
+	//
+	// 这条分支与下面的实时回路互斥：示范由老师「一步一决策」驱动，
+	// 节拍是秒级（老师单次 1.2s），塞进 30FPS 的回路只会不停丢帧。
+	if cfg.Demo {
+		demoClient := teacher.NewClient(cfg.TeacherURL, cfg.TeacherModel, func() teacher.Options {
+			o := teacher.ActionOptions()
+			o.Timeout = cfg.EvalTimeout
+			return o
+		}())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ver, pingErr := demoClient.Ping(ctx)
+		cancel()
+		if pingErr != nil {
+			log.Fatalf("示范模式需要老师在线，但连接 %s 失败: %v\n"+
+				"   提示：先启动本地实例 —— bash tools/serve_ollama.sh", cfg.TeacherURL, pingErr)
+		}
+
+		var hints []string
+		if s := strings.TrimSpace(*demoHints); s != "" {
+			for _, h := range strings.Split(s, ";") {
+				if h = strings.TrimSpace(h); h != "" {
+					hints = append(hints, h)
+				}
+			}
+		}
+		dem := &teacher.Demonstrator{Client: demoClient, Goal: cfg.Goal, Hints: hints}
+
+		fmt.Printf("老师: %s @ %s (Ollama %s) | 已关思考（think=false），单步约 1~2s\n",
+			cfg.TeacherModel, cfg.TeacherURL, ver)
+		if cfg.Goal != "" {
+			fmt.Printf("目标: %s\n", cfg.Goal)
+		}
+		for _, h := range hints {
+			fmt.Printf("先验: %s\n", h)
+		}
+		if !cfg.Live {
+			fmt.Println("⚠️  dry-run：老师照常决策但不会真的操作，加 -live 才发送触摸")
+		}
+
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+		if err := runDemo(cfg, be, dem, stop); err != nil {
+			log.Fatalf("示范回路异常: %v", err)
+		}
+		return
 	}
 
 	actor := agent.NewRule()

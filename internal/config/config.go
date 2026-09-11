@@ -41,6 +41,26 @@ type Config struct {
 	// EvalOutDir 评估报告落盘目录；空则只打印到控制台。
 	EvalOutDir string
 
+	// ---- Phase 2：老师在线示范（出动作 + 采集训练数据） ----
+	//
+	// Demo 为 true 时不跑固定节拍的实时回路，改由老师「一步一决策」地驱动：
+	// 抓彩色画面 → 送审老师 → 执行动作 → 等游戏响应 → 再抓。
+	// 之所以不复用 30FPS 的实时回路：老师单次要 1.2s，节拍天然是「秒级」，
+	// 硬塞进更快的回路只会不停丢帧、看不出真实因果。
+
+	// Demo 启用老师在线示范模式。
+	Demo bool
+	// DemoSteps 示范步数上限（0=直到 Ctrl+C）。
+	DemoSteps int
+	// DemoWidth 送审老师的彩色帧降采样宽度（比 EvalWidth 大，界面元素要看得清）。
+	DemoWidth int
+	// DemoWait 每步动作后等待游戏响应的时间。
+	DemoWait time.Duration
+	// DemoOut 示范数据落盘目录；空则用默认目录。
+	DemoOut string
+	// DemoColor 是否同时保存老师看到的彩色帧（便于人工复核，占空间）。
+	DemoColor bool
+
 	// ---- Android（ADB）后端 ----
 
 	// Target 控制目标："pc" 驱动本机键鼠（默认）；"android" 通过 ADB 遥控手机。
@@ -71,6 +91,13 @@ func Default() Config {
 		EvalTimeout:    180 * time.Second,
 		Goal:           "",
 		EvalOutDir:     "",
+
+		Demo:      false,
+		DemoSteps: 20,
+		DemoWidth: 1024,
+		DemoWait:  2 * time.Second,
+		DemoOut:   "",
+		DemoColor: false,
 
 		Target:     "pc",
 		ADBPath:    "",

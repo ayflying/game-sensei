@@ -1,12 +1,15 @@
 // Package teacher 实现「老师」：调用 Ollama 上的视觉语言模型（VLM），
-// 对学生轨迹做离线评估并产出文字反馈（Phase 1）。
+// 对学生轨迹做离线评估并产出文字反馈（Phase 1），
+// 以及在 Phase 2 里直接产出可执行动作（示范）。
 //
-// 实测踩坑（详见 README §9.1），客户端必须处理：
+// 实测踩坑（详见 README §9.1、§9.4），客户端必须处理：
 //   - qwen3 系列把推理过程写在 message.thinking、正文写在 message.content，
 //     正文可能为空 —— 必须双字段兜底，否则拿到空答复；
 //   - 思考会吃掉大量 token 预算，num_predict 需给足（默认 1500），
 //     否则整轮都在思考、正文永远出不来；
-//   - options.think=false 在 Ollama 0.34.0 上对 qwen3.5 系列无效，不能依赖。
+//   - **顶层 `think: false` 有效**（实测 1.3s / 零 thinking），
+//     但写在 `options.think` 里无效 —— 这是 0.34.0 上的关键区别，
+//     早期结论「think=false 无效」是因为位置放错了。
 //
 // 本包只依赖标准库，与平台无关，便于单测。
 package teacher
@@ -28,6 +31,10 @@ const (
 	DefaultMaxTokens   = 1500
 	DefaultTemperature = 0.0
 	DefaultTimeout     = 180 * time.Second
+
+	// ActionMaxTokens 是「出动作」场景的预算：配合 Think=false 时
+	// 实测只需 16 token 即可完成一行动作，给 200 是留足冗余。
+	ActionMaxTokens = 200
 )
 
 // Options 是单次推理的采样参数与超时。
@@ -35,7 +42,14 @@ type Options struct {
 	MaxTokens   int           // num_predict：输出 token 上限（含思考）
 	Temperature float64       // 采样温度，评估场景用 0
 	Timeout     time.Duration // 单次请求超时
+	// Think 是**顶层** think 开关。设为 false 可压制思考链，
+	// 让输出预算全留给正文（实测 qwen3.5:9b 从 65s/空正文 → 1.3s/正常正文）。
+	// nil 表示不传该字段，走模型默认行为。
+	Think *bool
 }
+
+// NoThink 返回一个指向 false 的指针，便于 Options{Think: teacher.NoThink()} 这种写法。
+func NoThink() *bool { b := false; return &b }
 
 // DefaultOptions 返回评估场景的保守默认值。
 func DefaultOptions() Options {
@@ -43,6 +57,17 @@ func DefaultOptions() Options {
 		MaxTokens:   DefaultMaxTokens,
 		Temperature: DefaultTemperature,
 		Timeout:     DefaultTimeout,
+	}
+}
+
+// ActionOptions 返回「出动作」场景的参数：关思考、低温度、短输出。
+// 这是 Phase 2 让老师跑在线示范的关键——不关思考单次要 60s+。
+func ActionOptions() Options {
+	return Options{
+		MaxTokens:   ActionMaxTokens,
+		Temperature: 0.1,
+		Timeout:     60 * time.Second,
+		Think:       NoThink(),
 	}
 }
 
@@ -70,10 +95,13 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-// NewClient 构造客户端；opts 为零值时使用 DefaultOptions。
+// NewClient 构造客户端；MaxTokens/Timeout 为零时补默认值（Think 单独保留）。
 func NewClient(baseURL, model string, opts Options) *Client {
-	if opts.MaxTokens <= 0 || opts.Timeout <= 0 {
-		opts = DefaultOptions()
+	if opts.MaxTokens <= 0 {
+		opts.MaxTokens = DefaultMaxTokens
+	}
+	if opts.Timeout <= 0 {
+		opts.Timeout = DefaultTimeout
 	}
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
@@ -120,6 +148,7 @@ type chatRequest struct {
 	Model    string         `json:"model"`
 	Messages []chatMessage  `json:"messages"`
 	Stream   bool           `json:"stream"`
+	Think    *bool          `json:"think,omitempty"` // 顶层开关，不是 options.think
 	Options  map[string]any `json:"options"`
 }
 
@@ -152,6 +181,7 @@ func (c *Client) Chat(ctx context.Context, prompt string, images [][]byte) (*Rep
 		Model:    c.Model,
 		Messages: []chatMessage{msg},
 		Stream:   false,
+		Think:    c.Options.Think,
 		Options: map[string]any{
 			"temperature": c.Options.Temperature,
 			"num_predict": c.Options.MaxTokens,
@@ -191,12 +221,17 @@ func (c *Client) Chat(ctx context.Context, prompt string, images [][]byte) (*Rep
 
 	text := strings.TrimSpace(out.Message.Content)
 	thinking := strings.TrimSpace(out.Message.Thinking)
-	if text == "" {
-		// 双字段兜底：qwen3 系列常把正文写进 thinking、content 留空
+	if text == "" && thinking != "" {
+		// 双字段兜底：qwen3 系列常把正文写进 thinking、content 留空。
+		// 注意这只在**没关思考**时才有意义；关思考后 thinking 应为空。
 		text = thinking
 	}
 	if text == "" {
-		return nil, fmt.Errorf("老师未返回任何内容（输出 %d token，可能思考预算不足）", out.EvalCount)
+		hint := "可能思考预算不足"
+		if c.Options.Think != nil && !*c.Options.Think {
+			hint = "已置 think=false，模型仍只输出思考或空答复"
+		}
+		return nil, fmt.Errorf("老师未返回任何内容（输出 %d token，%s）", out.EvalCount, hint)
 	}
 
 	stats := Stats{

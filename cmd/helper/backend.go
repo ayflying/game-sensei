@@ -21,7 +21,12 @@ import (
 //	真实输入（键鼠 / 触摸）在 Live=false 时被吞掉。
 type backend interface {
 	// Grab 抓一帧灰度观测（downWidth>0 时等比降采样）。
+	// 这是「学生」的输入：小、灰度、快。
 	Grab(downWidth int) (*image.Gray, error)
+	// GrabColor 抓一帧全分辨率彩色画面，供「老师」VLM 判读。
+	// 与 Grab 分开是刻意的：学生要的是低延迟小张量，老师要的是能认字的清晰画面，
+	// 两者的分辨率与色彩诉求正好相反，混用一个接口必然有一方将就。
+	GrabColor() (image.Image, error)
 	// Apply 执行一个动作（dry-run 时为空操作）。
 	Apply(act agent.Action) error
 	// Size 返回当前屏幕像素尺寸（PC 为桌面尺寸；Android 为当前方向尺寸）。
@@ -42,6 +47,8 @@ func newPCBackend(live bool) *pcBackend {
 }
 
 func (b *pcBackend) Grab(downWidth int) (*image.Gray, error) { return capture.Grab(downWidth) }
+
+func (b *pcBackend) GrabColor() (image.Image, error) { return capture.GrabColor() }
 
 func (b *pcBackend) Apply(act agent.Action) error { return b.actuator.Apply(act) }
 
@@ -70,6 +77,15 @@ func newADBBackend(dev *android.Device, live bool) *adbBackend {
 }
 
 func (b *adbBackend) Grab(downWidth int) (*image.Gray, error) { return b.dev.Grab(downWidth) }
+
+// GrabColor 直接复用已解码的截图：Screenshot 会缓存最近一帧彩色图，
+// 老师路径与感知路径在同一拍上通常只差几毫秒，没必要再截一次。
+func (b *adbBackend) GrabColor() (image.Image, error) {
+	if c := b.dev.LastColor(); c != nil {
+		return c, nil
+	}
+	return b.dev.Screenshot()
+}
 
 func (b *adbBackend) Apply(act agent.Action) error {
 	if !b.live {

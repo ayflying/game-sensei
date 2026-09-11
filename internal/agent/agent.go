@@ -23,6 +23,7 @@ const (
 	ActionTap                         // 触摸点按（Nx/Ny 归一化坐标，手游）
 	ActionSwipe                       // 触摸滑动（Nx,Ny 起点 -> Nx2,Ny2 终点，Dur 时长）
 	ActionLongPress                   // 触摸长按（Nx,Ny 按下并保持 Dur）
+	ActionJoystick                    // 虚拟摇杆（Nx,Ny 摇杆中心 -> Nx2,Ny2 推到的目标点，Dur 保持时长）
 )
 
 // Action 是一次决策输出。字段按需取用。
@@ -36,9 +37,9 @@ type Action struct {
 	Dx int // ActionMove 时的相对位移
 	Dy int
 
-	Nx, Ny   float64       // ActionTap/ActionSwipe/ActionLongPress 的坐标或起点
-	Nx2, Ny2 float64       // ActionSwipe 的终点
-	Dur      time.Duration // ActionSwipe 的手势时长 / ActionLongPress 的按住时长
+	Nx, Ny   float64       // ActionTap/ActionSwipe/ActionLongPress/ActionJoystick 的坐标或起点
+	Nx2, Ny2 float64       // ActionSwipe 的终点；ActionJoystick 的推杆目标点
+	Dur      time.Duration // ActionSwipe 的手势时长 / ActionLongPress 按住时长 / ActionJoystick 保持时长
 }
 
 // String 返回可读的动作描述，用于日志与轨迹记录。
@@ -55,6 +56,9 @@ func (a Action) String() string {
 			a.Nx, a.Ny, a.Nx2, a.Ny2, a.Dur.Milliseconds())
 	case ActionLongPress:
 		return fmt.Sprintf("hold:%.3f,%.3f/%dms", a.Nx, a.Ny, a.Dur.Milliseconds())
+	case ActionJoystick:
+		return fmt.Sprintf("joy:%.3f,%.3f->%.3f,%.3f/%dms",
+			a.Nx, a.Ny, a.Nx2, a.Ny2, a.Dur.Milliseconds())
 	default:
 		return "none"
 	}

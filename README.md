@@ -182,7 +182,10 @@ python tools/vlm_bench.py --image shot.png --models qwen3.5:2b --rounds 2
 
 - qwen3 系列把推理写在 `message.thinking`、正文写在 `message.content`，**两个字段都要兜底解析**；
   400 tok 预算常被思考吃光，`num_predict` 需给到 **≥1500**，或提示词里明确要求直接给答案。
-- `think=false` 参数在本机 Ollama 0.34.0 上对这两个模型**无效**，压不住思考。
+- **`think` 开关必须放在请求顶层，不能放进 `options`**（见 §9.4）。早前记录的
+  「`think=false` 在本机 Ollama 0.34.0 上无效」是**错误结论**——原因是当时写成了
+  `options.think`，Ollama 会直接忽略它。放对位置后效果立竿见影：
+  同图同提示词从 **65s / 正文为空** 变成 **1.3s / 正文正常**。
 - 同一模型在不同机器上速度差异极大（`qwen3-vl:2b` 远程 16~27 tok/s vs 本机 147 tok/s），
   **teacher 选型必须以目标机器实测为准**。
 
@@ -292,6 +295,86 @@ go run ./cmd/helper -target android -app com.tencent.nrc -launch -dry-run -teach
 | `-serial` | 设备序列号；单设备可省，多设备必填 |
 | `-app` | 安卓包名（如 `com.tencent.nrc`），仅安卓后端用 |
 | `-launch` | 启动 `-app` 指定的应用并等待其进入前台 |
+
+### 9.4 Phase 2：老师在线示范（-demo）
+
+Phase 1 的老师只在**旁路**看回放写评语；Phase 2 让它直接**驱动**游戏：
+看图 → 出动作 → 执行 → 再看图，同时把 `(学生观测, 老师动作)` 存成示范数据集，
+供后续蒸馏学生（模仿学习 / DAgger）。
+
+```bash
+# 先空跑验证链路（老师照常决策，但不碰手机）
+go run ./cmd/helper -target android -serial <sn> -app com.tencent.nrc \
+  -demo -demo-steps 5 -demo-color \
+  -demo-hints "虚拟摇杆中心在 x=0.21 y=0.69" \
+  -goal "在开放世界里探索，靠近任务追踪里的目标"
+
+# 确认无误后实况采集
+go run ./cmd/helper -target android -serial <sn> -app com.tencent.nrc \
+  -demo -live -demo-steps 200 -demo-wait 2500ms -demo-color \
+  -demo-hints "虚拟摇杆中心在 x=0.21 y=0.69" \
+  -goal "..." -demo-out .workbuddy/demos/session-01
+```
+
+| 参数 | 说明 |
+|---|---|
+| `-demo` | 启用示范模式（蕴含 `-teacher`），与实时回路互斥 |
+| `-demo-steps` | 步数上限，`0` = 直到 Ctrl+C |
+| `-demo-width` | 送审老师的彩色帧降采样宽度（默认 1024） |
+| `-demo-wait` | 每步后等游戏响应的时间（默认 2s）。**必须给足**，否则下一帧拍到的还是旧画面 |
+| `-demo-out` | 数据目录，空则 `.workbuddy/demos/<时间戳>` |
+| `-demo-color` | 额外保存老师看到的彩色帧，便于人工复核 |
+| `-demo-hints` | 额外界面先验，`;` 分隔（摇杆中心这类常量，不告诉它就得靠猜） |
+
+**示范数据集格式**（`trainer/` 的输入，字段名已用单测钉住）：
+
+```
+<dir>/
+├── meta.json         目标/模型/屏幕尺寸/步数/解析成功率/平均耗时
+├── trajectory.jsonl  每行一个样本
+├── frames/step_0001.png   学生观测（灰度降采样）—— 训练时的网络输入
+└── color/step_0001.jpg    老师看到的彩色帧（可选）
+```
+
+**关键实现细节：**
+
+- **`think` 开关必须放请求顶层**（`teacher.Options.Think`）。这是本轮最重要的修正：
+  早前记录的「本机 Ollama 0.34.0 上 `think=false` 无效」是**错误结论**——
+  当时写成了 `options.think`，Ollama 直接忽略。放对位置后，同图同提示词从
+  **65s / 正文为空** 变成 **1.3s / 正文正常**，老师才可能跑在在线回路里。
+- **学生观测与老师视野是两个通道**：`backend.Grab` 给灰度小图（学生输入），
+  `backend.GrabColor` 给全分辨率彩色图（老师判读）。混用一个接口必然有一方将就。
+- **送审用 JPEG 不用 PNG**：1024 宽下 130KB vs 1.5MB，编码与传输快一个量级，
+  界面判读并不需要无损。降采样在 `internal/vision` 里做**区域平均**，
+  2608→1024 这种比例下最近邻会把小图标糊成色块。
+- **动作解析容错**（`agent.ParseAction`）：大小写不敏感、全半角标点都认、
+  键值顺序任意、允许和中文说明混在一行。但**必须要求坐标成对出现**——
+  否则「建议：点击右下角按钮」「摇杆: x=0.21 y=0.69」这类**描述**行
+  会被当成动作执行，机器人会莫名去点左上角。
+
+**实测（Redmi 25102RKBEC / Android 16 / qwen3.5:9b 本机 3060）：**
+
+| 指标 | 实测值 |
+|---|---|
+| 单步耗时（think=false） | **1.8~2.0s**（34 tok 输出） |
+| 单步耗时（默认思考） | 60s+，且正文常被思考挤空 |
+| 动作格式合规率 | 20/20 步（两轮实况） |
+| 端到端 | 截图 → 老师出动作 → ADB 触碰 → 落盘，全链路打通 |
+
+**已暴露的局限（诚实记录，别当成已解决）：**
+
+- ⚠️ **提示词里的具体数字会被照抄**。早期 `ActionProtocol()` 的示例写成
+  `ACTION JOYSTICK cx=0.21 cy=0.69 tx=0.81 ty=0.69 dur=1200`，
+  模型 8 步输出的动作**与示例逐字节相同** —— 看着像「模型不会决策」，
+  实际是「示例被当成了答案」。已改为 `<占位符>` 形式。
+  小模型对提示词里的具体数值极其敏感，写示例时务必用不可直接复制的形式。
+- ⚠️ **单帧决策没有记忆**，容易在原地重复同一动作。已通过 `Demonstrator.PrevAction`
+  把上一步喂回去缓解（并把 `prev_action` 一并存进数据集）。
+- ⚠️ **动作质量尚未达标**：模型能正确读出画面地标（8/8 答对「帐篷」），
+  但读小号距离数字不可靠，且决策偏向提示词的结构先验，
+  离「朝 24 米外的目标走过去」这种目标导向导航还很远。
+  这正是需要采集示范数据 + 蒸馏学生的原因，不是靠调提示词能解决的。
+- ⚠️ **dry-run 下采不到多样数据**：画面不变 → 老师给同一动作。要有多样性必须 `-live`。
 
 ---
 
