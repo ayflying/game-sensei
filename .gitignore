@@ -1,0 +1,30 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+bin/
+vendor/
+
+# Model artifacts (distributed separately at runtime, not in repo)
+*.onnx
+models/*.onnx
+
+# onnxruntime native libs (shipped with release bundle)
+onnxruntime*/
+
+# Python training outputs
+trainer/__pycache__/
+trainer/*.pt
+trainer/runs/
+*.onnx
+
+# Replays / logs / env
+replays/
+*.log
+.env
+.venv/
+__pycache__/
