@@ -77,15 +77,20 @@
 
 ```
 game-sensei/
-├── cmd/helper/main.go        # 编排：启两个 goroutine + 信号退出（Phase 0 占位）
+├── cmd/helper/main.go        # 编排：实时回路 + 延迟统计 + 信号退出（Phase 0 已实现）
 ├── internal/
-│   ├── capture/              # 截屏
-│   ├── agent/                # onnxruntime-go 推理 + 模型热重载
-│   ├── input/                # robotgo 键鼠
-│   ├── teacher/              # Ollama HTTP 客户端 + 评估/示范提示词
+│   ├── capture/              # 截屏（GDI BitBlt → 灰度降采样，纯 syscall）
+│   ├── agent/                # Actor 接口 + 规则学生（后续换量化 ONNX 实现）
+│   ├── input/                # 键鼠（user32!SendInput，纯 syscall）
+│   ├── teacher/              # Ollama HTTP 客户端 + 评估/示范提示词（Phase 1）
 │   ├── memory/               # 轨迹缓冲
-│   └── config/               # 目标/评分标准（按游戏可配）
+│   └── config/               # 帧率/降采样/动作集（按游戏可配）
 ├── models/                   # *.onnx（trainer 导出，运行时热载，不入库）
+├── tools/                    # 本地测试工具（非运行时依赖）
+│   ├── serve_ollama.sh       # 启动项目自带的 Ollama 实例（独立端口 11435）
+│   ├── screenshot.py         # 抓一张截图供 VLM 评测
+│   └── vlm_bench.py          # VLM 选型评测：延迟 / 速度 / 输出质量
+├── .ollama/                  # 项目内 Ollama 模型库（体积大，不入库）
 └── trainer/                  # Python 离线训练工具（非运行时）
     ├── train.py
     └── requirements.txt
@@ -137,12 +142,45 @@ go run ./cmd/helper
 
 后续按 `internal/` 各包与 Phase 0→3 路线图逐步填充实现。
 
+### 9.1 教师模型环境（项目自带 Ollama）
+
+teacher 用的 VLM 走**项目内自带的 Ollama 实例**（独立端口 11435、模型库在 `.ollama/models`），
+与系统安装的 Ollama 隔离，不依赖任何远程设备：
+
+```bash
+# 1. 启动项目自带实例（模型库落在 .ollama/models，已 gitignore）
+bash tools/serve_ollama.sh
+
+# 2. 另一个终端：拉模型（也可从别处拷贝 .ollama/models 整目录）
+curl -X POST http://127.0.0.1:11435/api/pull -d '{"model":"qwen3.5:2b"}'
+
+# 3. 评测：抓一张截图，跑延迟/速度/质量对比
+python tools/screenshot.py -o shot.png
+python tools/vlm_bench.py --image shot.png --models qwen3.5:2b --rounds 2
+```
+
+**实测选型（RTX 3060 12GB，1920×1080 截图，同一提示词）：**
+
+| 模型 | 生成本文 | 单次评估 | 判定 |
+|---|---|---|---|
+| `qwen3.5:9b` Q4 | 106 tok/s | ~10s | ✅ teacher 主力，细节最准 |
+| `qwen3.5:2b` Q8 | 105 tok/s | ~10s（含 975tok 思考） | ✅ 快速档，主力内容识别正确 |
+| `qwen3-vl:2b` Q4 | 147 tok/s | 14s+ 仍不产出正文 | ❌ 思考链死循环，不采用 |
+
+**已知坑（teacher 客户端必须处理）：**
+
+- qwen3 系列把推理写在 `message.thinking`、正文写在 `message.content`，**两个字段都要兜底解析**；
+  400 tok 预算常被思考吃光，`num_predict` 需给到 **≥1500**，或提示词里明确要求直接给答案。
+- `think=false` 参数在本机 Ollama 0.34.0 上对这两个模型**无效**，压不住思考。
+- 同一模型在不同机器上速度差异极大（`qwen3-vl:2b` 远程 16~27 tok/s vs 本机 147 tok/s），
+  **teacher 选型必须以目标机器实测为准**。
+
 ---
 
 ## 10. 参考
 
 - 架构闭环与 Go 模块结构见设计讨论（项目初始化时由 AI 助手绘制的架构图）。
-- 大模型教师建议：本地 Ollama 运行 Qwen2.5-VL（视觉语言模型）做回放评估与示范。
+- 大模型教师实测选型与本地 Ollama 环境见 §9.1（推荐 `qwen3.5:9b` 主力 + `qwen3.5:2b` 快速档）。
 
 ---
 
