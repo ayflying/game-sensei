@@ -40,6 +40,17 @@ type Config struct {
 	Goal string
 	// EvalOutDir 评估报告落盘目录；空则只打印到控制台。
 	EvalOutDir string
+
+	// ---- Android（ADB）后端 ----
+
+	// Target 控制目标："pc" 驱动本机键鼠（默认）；"android" 通过 ADB 遥控手机。
+	Target string
+	// ADBPath adb 可执行文件路径；空则依次从 ANDROID_HOME、PATH、常见目录自动查找。
+	ADBPath string
+	// Serial ADB 设备序列号；空则要求恰好一台在线设备（多台时报错，避免误操作到别的手机）。
+	Serial string
+	// AppPackage android 模式下要操作的应用包名（如 com.tencent.nrc）。
+	AppPackage string
 }
 
 // Default 返回一份安全的默认配置（dry-run，老师关闭）。
@@ -60,5 +71,10 @@ func Default() Config {
 		EvalTimeout:    180 * time.Second,
 		Goal:           "",
 		EvalOutDir:     "",
+
+		Target:     "pc",
+		ADBPath:    "",
+		Serial:     "",
+		AppPackage: "",
 	}
 }

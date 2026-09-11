@@ -32,5 +32,8 @@ __pycache__/
 # WorkBuddy 本地记忆/会话数据（含私有笔记，不入公开仓库）
 .workbuddy/
 
+# CodeGraph 本地索引（可随时 codegraph init -i 重建，不入库）
+.codegraph/
+
 # 本地 Ollama 模型库（体积大，仅本机测试用，不入库）
 .ollama/

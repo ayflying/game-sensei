@@ -7,23 +7,57 @@
 // 本包与平台无关（不依赖 syscall），便于单测。
 package agent
 
-import "image"
+import (
+	"fmt"
+	"image"
+	"time"
+)
 
 // ActionKind 是动作类型。
 type ActionKind int
 
 const (
-	ActionNone ActionKind = iota // 不动作
-	ActionKey                    // 离散键位短按（Code 指定）
-	ActionMove                   // 鼠标相对移动（Dx/Dy 指定）
+	ActionNone      ActionKind = iota // 不动作
+	ActionKey                         // 离散键位短按（Code 指定，PC 键鼠）
+	ActionMove                        // 鼠标相对移动（Dx/Dy 指定）
+	ActionTap                         // 触摸点按（Nx/Ny 归一化坐标，手游）
+	ActionSwipe                       // 触摸滑动（Nx,Ny 起点 -> Nx2,Ny2 终点，Dur 时长）
+	ActionLongPress                   // 触摸长按（Nx,Ny 按下并保持 Dur）
 )
 
 // Action 是一次决策输出。字段按需取用。
+//
+// 坐标统一用归一化值（0~1，相对当前屏幕宽高）：同一套策略可跨分辨率、
+// 跨设备复用，执行后端（PC 键鼠 / Android 触摸）负责换算成实际坐标。
 type Action struct {
 	Kind ActionKind
-	Code string // ActionKey 时的键名：left/up/right/down
-	Dx   int    // ActionMove 时的相对位移
-	Dy   int
+	Code string // ActionKey 时的键名：left/up/right/down（PC）或 back/home（Android）
+
+	Dx int // ActionMove 时的相对位移
+	Dy int
+
+	Nx, Ny   float64       // ActionTap/ActionSwipe/ActionLongPress 的坐标或起点
+	Nx2, Ny2 float64       // ActionSwipe 的终点
+	Dur      time.Duration // ActionSwipe 的手势时长 / ActionLongPress 的按住时长
+}
+
+// String 返回可读的动作描述，用于日志与轨迹记录。
+func (a Action) String() string {
+	switch a.Kind {
+	case ActionKey:
+		return "key:" + a.Code
+	case ActionMove:
+		return fmt.Sprintf("move:%+d,%+d", a.Dx, a.Dy)
+	case ActionTap:
+		return fmt.Sprintf("tap:%.3f,%.3f", a.Nx, a.Ny)
+	case ActionSwipe:
+		return fmt.Sprintf("swipe:%.3f,%.3f->%.3f,%.3f/%dms",
+			a.Nx, a.Ny, a.Nx2, a.Ny2, a.Dur.Milliseconds())
+	case ActionLongPress:
+		return fmt.Sprintf("hold:%.3f,%.3f/%dms", a.Nx, a.Ny, a.Dur.Milliseconds())
+	default:
+		return "none"
+	}
 }
 
 // Actor 是「学生」的抽象：给定一帧灰度观测，输出一个动作。

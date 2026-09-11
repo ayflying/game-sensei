@@ -78,13 +78,15 @@
 ```
 game-sensei/
 ├── cmd/helper/main.go        # 编排：实时回路 + 延迟统计 + 信号退出（Phase 0 已实现）
+├── cmd/helper/backend.go     # 后端抽象：pcBackend（GDI+SendInput）/ adbBackend（ADB）
 ├── internal/
 │   ├── capture/              # 截屏（GDI BitBlt → 灰度降采样，纯 syscall）
+│   ├── android/              # 安卓 ADB 后端：截图 / 触控 / 滑动 / 摇杆 / 按键 / 拉起应用
 │   ├── agent/                # Actor 接口 + 规则学生（后续换量化 ONNX 实现）
 │   ├── input/                # 键鼠（user32!SendInput，纯 syscall）
 │   ├── teacher/              # Ollama 客户端 + 轨迹评估器 + 提示词（Phase 1 已落地）
 │   ├── memory/               # 轨迹缓冲
-│   └── config/               # 帧率/降采样/动作集（按游戏可配）
+│   └── config/               # 帧率/降采样/动作集/目标平台（按游戏可配）
 ├── models/                   # *.onnx（trainer 导出，运行时热载，不入库）
 ├── tools/                    # 本地测试工具（非运行时依赖）
 │   ├── serve_ollama.sh       # 启动项目自带的 Ollama 实例（独立端口 11435）
@@ -109,6 +111,9 @@ game-sensei/
   抽样抓帧不阻塞实时回路。已用本机 `qwen3.5:2b` 端到端验证通过（详见 §9.2）。
 - **Phase 2**：老师产出**示范轨迹**，自动用示范微调学生（蒸馏 / bootstrapping），打通 `trainer/`。
 - **Phase 3**：自动化飞轮——老师定期评估 + 选优轨迹 + 触发微调 + 回灌，形成自学习；**泛型化**（换游戏只需换目标定义 + 初始示范）。
+- **Phase 0.5 ✅ 已落地**：**目标环境泛化**——新增安卓 ADB 后端（`internal/android` + `cmd/helper/backend.go`），
+  使同一套实时/教学回路既能操作 PC 桌面窗口，也能操作真机手游（截图 → 触控/滑动/摇杆/按键）。
+  动作空间升级为归一化坐标，跨分辨率复用；详见 §9.3。
 
 ---
 
@@ -217,6 +222,76 @@ go run ./cmd/helper -frames 3000 -teacher \
 **端到端验证（本机 `qwen3.5:2b`，workbuddy 桌面为「游戏画面」）：** 老师 12.7s 返回，
 正确指出「画面是聊天界面而非游戏主画面」，给出关闭窗口→进入游戏→再推方块的建议，评分 0；
 报告落盘正常。`internal/teacher` 另有 mock 单测覆盖双字段兜底、图片编码、超时与错误路径。
+
+### 9.3 双后端：PC 桌面 / 安卓 ADB
+
+`backend` 接口统一了两类目标环境，实时回路与教学回路都只依赖接口：
+
+```go
+type backend interface {
+    Grab(width int) (image.Image, error)   // 当前画面（灰度降采样）
+    Size() (int, int)                      // 当前画面尺寸
+    Describe() string                      // 人类可读的目标描述（进提示词 / 报告）
+    Live() bool                            // 目标是否仍可操作
+    Apply(act agent.Action) error          // 执行动作
+}
+```
+
+| 后端 | 实现 | 画面来源 | 动作执行 |
+|---|---|---|---|
+| `pc`（默认） | `pcBackend` | `internal/capture` GDI BitBlt | `internal/input` user32!SendInput |
+| `android` | `adbBackend` | `internal/android` `exec-out screencap -p` | `internal/android` `input tap/swipe/keyevent` |
+
+**安卓后端能力（`internal/android`）：**
+
+| 方法 | 说明 |
+|---|---|
+| `FindADB()` / `Devices()` | 定位 `adb.exe`（查 `ANDROID_HOME` / `ANDROID_SDK_ROOT` / PATH / 常见安装路径）；列出设备 |
+| `Open(adbPath, serial)` | 连接指定设备；多设备且未指定 serial 时报错，不做隐式选择 |
+| `Screenshot()` / `SavePNG()` | `exec-out screencap -p` 取 PNG 并解码，同时缓存画面尺寸 |
+| `ScreenSize()` | **优先用缓存截图尺寸**（反映当前坐标系，横屏下为 2608×1200 而非物理 1200×2608）；退化时用 `wm size` + `rotationDegrees` 交换宽高 |
+| `Tap` / `TapNorm` | 绝对坐标 / 归一化坐标（0~1）点击 |
+| `Swipe` / `SwipeNorm` / `LongPress` / `LongPressNorm` | 滑动、长按（长按=原地 swipe） |
+| `Joystick(cx,cy,dx,dy,dur)` / `JoystickNorm` | 虚拟摇杆：按住中心后推偏移量并保持 dur，再抬起 |
+| `Key(code)` | 按键，键名归一化（`home`/`back`/`enter` 等 → `KEYCODE_*`） |
+| `Launch(pkg)` | `resolve-activity` + `am start`，失败回退 `monkey -p` |
+| `Foreground()` / `IsForeground()` / `WaitForeground()` | 前台包名解析（`mCurrentFocus` / `mFocusedApp` / `mResumedActivity` 三种输出格式都兼容） |
+
+**关键约束与实测数据：**
+
+- **横屏判定**：安卓游戏多为横屏，但物理分辨率是竖屏值。`ScreenSize()` 必须以当前截图尺寸为准，
+  否则归一化坐标会整体错位（这是早期一次踩坑，已修复并有 `parseForegroundPkg` / `rotationDegrees` 单测覆盖）。
+- **零 CGO 保持**：ADB 后端全部通过 `os/exec` 调用 `adb.exe`，Windows 下带 `CREATE_NO_WINDOW`
+  （`0x08000000`）+ `HideWindow`，不弹黑窗口；核心仍然 `CGO_ENABLED=0`。
+- **动作空间扩展**：`agent.Action` 新增 `ActionTap` / `ActionSwipe` / `ActionLongPress`，
+  并带 `Nx,Ny,Nx2,Ny2 float64`（归一化坐标）与 `Dur time.Duration`，实现「一套动作跨分辨率复用」。
+- **安卓默认帧率自动降为 5 FPS**（`screencap` 约 0.94s/帧、`input` 约 0.3~0.6s/次），
+  未显式指定 `-fps` 时由 `openBackend` 自动设置——**PC 的 30FPS 假设在 ADB 上不成立**。
+
+**用法：**
+
+```bash
+# PC 后端（默认，与 Phase 0 行为一致）
+go run ./cmd/helper
+
+# 安卓后端：连上手机，拉起游戏并接管
+go run ./cmd/helper -target android -app com.tencent.nrc -launch
+
+# 多设备时指定序列号；-adb 可显式指定 adb.exe
+go run ./cmd/helper -target android -serial 1cd89cd4 -adb "D:/sdk/platform-tools/adb.exe" -app com.tencent.nrc
+
+# 安卓 + 老师查岗（干跑，不发送真实触控）
+go run ./cmd/helper -target android -app com.tencent.nrc -launch -dry-run -teacher \
+  -goal "在洛克王国：世界中学会移动与捕捉精灵" -eval-out .workbuddy/eval-reports
+```
+
+| 参数 | 说明 |
+|---|---|
+| `-target` | `pc`（默认）/ `android` |
+| `-adb` | `adb.exe` 路径；空则自动查找 |
+| `-serial` | 设备序列号；单设备可省，多设备必填 |
+| `-app` | 安卓包名（如 `com.tencent.nrc`），仅安卓后端用 |
+| `-launch` | 启动 `-app` 指定的应用并等待其进入前台 |
 
 ---
 

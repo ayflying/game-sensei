@@ -11,8 +11,10 @@
 //	helper [-live] [-fps 30] [-down 160] [-frames 0] [-report 30]
 //	       [-teacher] [-teacher-url http://127.0.0.1:11435] [-teacher-model qwen3.5:9b]
 //	       [-eval-every 300] [-eval-frames 6] [-eval-width 640] [-goal "..."] [-eval-out dir]
+//	       [-target pc|android] [-adb path] [-serial sn] [-app 包名] [-launch]
 //
-// 默认 dry-run（不真正发送键鼠），Ctrl+C 或达到 -frames 后干净退出。
+// 默认 dry-run（不真正发送输入），Ctrl+C 或达到 -frames 后干净退出。
+// -target android 时通过 ADB 遥控手机：截屏为感知、触摸 tap/swipe 为行动。
 package main
 
 import (
@@ -28,9 +30,7 @@ import (
 	"time"
 
 	"github.com/ayflying/game-sensei/internal/agent"
-	"github.com/ayflying/game-sensei/internal/capture"
 	"github.com/ayflying/game-sensei/internal/config"
-	"github.com/ayflying/game-sensei/internal/input"
 	"github.com/ayflying/game-sensei/internal/memory"
 	"github.com/ayflying/game-sensei/internal/teacher"
 )
@@ -52,7 +52,25 @@ func main() {
 	flag.DurationVar(&cfg.EvalTimeout, "eval-timeout", cfg.EvalTimeout, "单次送审超时")
 	flag.StringVar(&cfg.Goal, "goal", cfg.Goal, "游戏目标描述（写入老师提示词）")
 	flag.StringVar(&cfg.EvalOutDir, "eval-out", cfg.EvalOutDir, "评估报告落盘目录（空=仅控制台）")
+
+	flag.StringVar(&cfg.Target, "target", cfg.Target, "控制目标：pc（本机键鼠）| android（ADB 遥控手机）")
+	flag.StringVar(&cfg.ADBPath, "adb", cfg.ADBPath, "adb 可执行文件路径（空=自动查找）")
+	flag.StringVar(&cfg.Serial, "serial", cfg.Serial, "ADB 设备序列号（空=取唯一在线设备）")
+	flag.StringVar(&cfg.AppPackage, "app", cfg.AppPackage, "android 模式要操作的应用包名")
+	launchApp := flag.Bool("launch", false, "android 模式下先启动 -app 指定的应用")
 	flag.Parse()
+
+	// 用户未显式指定帧率时，按平台给不同默认值：ADB 截图单帧约 200~400ms，
+	// 30FPS 只会让 ticker 空转刷屏，降到 5FPS 更贴近实际吞吐。
+	fpsSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "fps" {
+			fpsSet = true
+		}
+	})
+	if !fpsSet && cfg.Target == "android" {
+		cfg.TargetFPS = 5
+	}
 
 	if cfg.TargetFPS <= 0 {
 		cfg.TargetFPS = 30
@@ -64,15 +82,21 @@ func main() {
 
 	mode := "dry-run（不发送真实输入）"
 	if cfg.Live {
-		mode = "LIVE（真实键鼠输入）"
+		mode = "LIVE（真实输入）"
 	}
 	fmt.Printf("game-sensei | 模式=%s | 目标=%dFPS | 降采样宽=%dpx\n", mode, cfg.TargetFPS, cfg.DownsampleWidth)
 
-	rect, err := capture.Bounds()
+	be, err := openBackend(cfg, *launchApp)
 	if err != nil {
-		log.Fatalf("截屏初始化失败: %v", err)
+		log.Fatalf("后端初始化失败: %v", err)
 	}
-	fmt.Printf("主屏: %dx%d | Ctrl+C 退出\n", rect.Dx(), rect.Dy())
+	fmt.Printf("控制目标: %s\n", be.Describe())
+
+	scrW, scrH, err := be.Size()
+	if err != nil {
+		log.Fatalf("获取屏幕尺寸失败: %v", err)
+	}
+	fmt.Printf("屏幕: %dx%d | Ctrl+C 退出\n", scrW, scrH)
 
 	// 老师自检：不可达就降级（实时回路照跑，只是不做评估）。
 	var evaluator *teacher.Evaluator
@@ -102,7 +126,6 @@ func main() {
 	}
 
 	actor := agent.NewRule()
-	actuator := input.NewActuator(cfg.Live)
 	traj := memory.NewBuffer(4096)
 
 	stop := make(chan os.Signal, 1)
@@ -117,12 +140,12 @@ func main() {
 	var teachDone chan struct{}
 	if evaluator != nil {
 		teachDone = make(chan struct{})
-		go teachLoop(cfg, evaluator, traj, sampleCh, stop, teachDone)
+		go teachLoop(cfg, evaluator, traj, be, sampleCh, stop, teachDone)
 	}
 
 	loopErr := make(chan error, 1)
 	go func() {
-		loopErr <- runLoop(cfg, tickInterval, actor, actuator, traj, frameCh, sampleCh, evaluator != nil, stop)
+		loopErr <- runLoop(cfg, tickInterval, actor, be, traj, frameCh, sampleCh, evaluator != nil, stop)
 	}()
 
 	select {
@@ -154,8 +177,12 @@ type sample struct {
 }
 
 // runLoop 是实时执行回路（goroutine A）：抓屏 -> 决策 -> 输入，按节拍节流。
+// runLoop 是实时执行回路（goroutine A）：抓屏 -> 决策 -> 输入，按节拍节流。
+//
+// 感知与行动都通过 backend 抽象，因此同一段回路既能驱动本机键鼠，
+// 也能通过 ADB 驱动手机——换后端不改逻辑。
 func runLoop(cfg config.Config, tick time.Duration, actor agent.Actor,
-	actuator *input.Actuator, traj *memory.Buffer,
+	be backend, traj *memory.Buffer,
 	frameCh chan<- memory.Record, sampleCh chan<- sample, sampling bool,
 	stop <-chan os.Signal) error {
 
@@ -172,7 +199,7 @@ func runLoop(cfg config.Config, tick time.Duration, actor agent.Actor,
 		}
 
 		t0 := time.Now()
-		frame, err := capture.Grab(cfg.DownsampleWidth)
+		frame, err := be.Grab(cfg.DownsampleWidth)
 		if err != nil {
 			return err
 		}
@@ -184,7 +211,7 @@ func runLoop(cfg config.Config, tick time.Duration, actor agent.Actor,
 		}
 		t2 := time.Now()
 
-		if err := actuator.Apply(act); err != nil {
+		if err := be.Apply(act); err != nil {
 			return err
 		}
 		t3 := time.Now()
@@ -228,7 +255,7 @@ func runLoop(cfg config.Config, tick time.Duration, actor agent.Actor,
 // 攒够 EvalFrames 帧后送审老师，打印反馈并可选落盘报告。
 //
 // 抓帧与推理都在本协程内完成，实时回路的每帧延迟不受影响。
-func teachLoop(cfg config.Config, ev *teacher.Evaluator, traj *memory.Buffer,
+func teachLoop(cfg config.Config, ev *teacher.Evaluator, traj *memory.Buffer, be backend,
 	sampleCh <-chan sample, stop <-chan os.Signal, done chan<- struct{}) {
 
 	defer close(done)
@@ -242,7 +269,7 @@ func teachLoop(cfg config.Config, ev *teacher.Evaluator, traj *memory.Buffer,
 			if !ok {
 				return
 			}
-			img, err := capture.Grab(cfg.EvalWidth)
+			img, err := be.Grab(cfg.EvalWidth)
 			if err != nil {
 				fmt.Printf("[老师] 抓取送审帧失败: %v\n", err)
 				continue
