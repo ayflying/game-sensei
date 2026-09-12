@@ -94,6 +94,7 @@ func main() {
 
 	// ---- Phase 2：老师在线示范 ----
 	flag.BoolVar(&cfg.Demo, "demo", cfg.Demo, "启用老师在线示范：老师看着画面出动作，并采集示范数据")
+	studentWeights := flag.String("student", "", "学生权重文件路径（trainer/train.py 产物）。指定后实时回路由学生驱动而非规则 stub")
 	flag.IntVar(&cfg.DemoSteps, "demo-steps", cfg.DemoSteps, "示范步数上限（0=直到 Ctrl+C）")
 	flag.IntVar(&cfg.DemoWidth, "demo-width", cfg.DemoWidth, "送审老师的彩色帧降采样宽度（像素）")
 	flag.DurationVar(&cfg.DemoWait, "demo-wait", cfg.DemoWait, "每步动作后等待游戏响应的时间")
@@ -219,6 +220,12 @@ func main() {
 	if *focusOnStart && cfg.Target != "android" {
 		if kw := gameKeyword(cfg, prof); kw != "" {
 			gamewin.EnsureDPIAware()
+			// 锁屏/系统 UI 在前台时置顶必败、点击会落到锁屏上，
+			// 还会引发 GDI 会话失效（BitBlt 连续 handle invalid）。
+			// 直接拒绝启动，别让 agent 对着锁屏空跑。
+			if gamewin.ForegroundIsSystemUI() {
+				log.Fatalf("前台是锁屏/系统 UI，无法安全操作。请解锁屏幕（动一下鼠标键盘）后重新运行。")
+			}
 			if n, err := gamewin.FocusByTitle(kw); err != nil {
 				fmt.Printf("⚠️  置顶游戏窗口失败（关键词 %q）: %v\n", kw, err)
 				logHook("置顶失败: " + err.Error())
@@ -320,7 +327,14 @@ func main() {
 		return
 	}
 
-	actor := agent.NewRule()
+	var actor agent.Actor = agent.NewRule()
+	if *studentWeights != "" {
+		sa, err := NewStudentActor(*studentWeights, prof)
+		if err != nil {
+			log.Fatalf("加载学生权重失败: %v", err)
+		}
+		actor = sa
+	}
 	traj := memory.NewBuffer(4096)
 
 	stop := make(chan os.Signal, 1)

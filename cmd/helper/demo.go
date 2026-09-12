@@ -92,9 +92,23 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-ch
 
 		// 1) 感知：灰度图是「学生观测」，彩色图是「老师视野」。
 		//    Android 后端下两次调用共用同一张截图缓存，不会多截一次。
-		gray, err := be.Grab(cfg.DownsampleWidth)
-		if err != nil {
-			return fmt.Errorf("第 %d 步抓取灰度帧失败: %w", step, err)
+		//    GDI 抓屏偶发失败（前台切换/锁屏过渡会让 DC 短暂失效），
+		//    重试 2 次、间隔 500ms——一次抖动不该让整段示范报废。
+		var gray *image.Gray
+		for attempt := 0; ; attempt++ {
+			gray, err = be.Grab(cfg.DownsampleWidth)
+			if err == nil {
+				break
+			}
+			if attempt >= 2 {
+				return fmt.Errorf("第 %d 步抓取灰度帧失败（已重试 %d 次）: %w", step, attempt, err)
+			}
+			fmt.Printf("[%s] ⚠️  抓屏失败将重试: %v\n", progress(step, steps), err)
+			select {
+			case <-stop:
+				return finishDemo(w, &closed, parsedOK, applied)
+			case <-time.After(500 * time.Millisecond):
+			}
 		}
 		color, err := be.GrabColor()
 		if err != nil {

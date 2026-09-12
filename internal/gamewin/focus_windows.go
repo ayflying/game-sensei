@@ -33,7 +33,36 @@ var (
 	procGetCurrentThreadId    = kernel32.NewProc("GetCurrentThreadId")
 	procKeybdEvent            = user32.NewProc("keybd_event")
 	procSetProcessDPIAware    = user32.NewProc("SetProcessDPIAware")
+	procGetClassNameW         = user32.NewProc("GetClassNameW")
 )
+
+// ForegroundClassName 返回前台窗口的 Win32 类名。
+//
+// 类名比标题可靠：锁屏（LockApp）的标题不固定，但类名恒为
+// Windows.UI.Core.CoreWindow。置顶失败时先用它区分「被别的应用挡住」
+// 还是「屏幕锁着」——后者重试多少次都没用，必须人解锁。
+func ForegroundClassName() string {
+	h, _, _ := procGetForegroundWindow.Call()
+	if h == 0 {
+		return ""
+	}
+	buf := make([]uint16, 256)
+	n, _, _ := procGetClassNameW.Call(h, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return syscall.UTF16ToString(buf[:n])
+}
+
+// ForegroundIsSystemUI 判断前台是否锁屏/系统级 UI（UAC、锁屏、开始菜单悬浮层）。
+// 此时任何跨进程置顶都会被拒，SendInput 的点击会落在锁屏上——
+// 不仅无效，锁屏状态切换还会让本进程的 GDI 句柄批量失效
+// （实测 BitBlt 连续报 "The handle is invalid"，2026-09-12）。
+func ForegroundIsSystemUI() bool {
+	switch ForegroundClassName() {
+	case "Windows.UI.Core.CoreWindow", // 锁屏 / 开始菜单搜索 / 通知中心
+		"#32770": // 系统对话框（含 UAC 提权框）
+		return true
+	}
+	return false
+}
 
 const (
 	swRestore = 9 // 还原（最小化/最大化都回到正常尺寸）
