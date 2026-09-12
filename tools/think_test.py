@@ -12,10 +12,13 @@ import argparse
 import base64
 import io
 import json
+import os
 import time
 import urllib.request
 
-URL = "http://127.0.0.1:11435/api/chat"
+# 老师地址：环境变量 GAME_SENSEI_TEACHER_URL 优先，未设置则用本机项目自带实例
+URL = os.environ.get("GAME_SENSEI_TEACHER_URL",
+                     "http://127.0.0.1:11435").rstrip("/") + "/api/chat"
 MODEL = "qwen3.5:9b"
 
 MIN_PROMPT = """你是手机游戏《洛克王国：世界》的操作助手。

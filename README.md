@@ -171,7 +171,7 @@ go run ./cmd/helper
 
 ### 9.1 教师模型环境（项目自带 Ollama）
 
-teacher 用的 VLM 走**项目内自带的 Ollama 实例**（独立端口 11435、模型库在 `.ollama/models`），
+teacher 用的 VLM 默认走**项目内自带的 Ollama 实例**（独立端口 11435、模型库在 `.ollama/models`），
 与系统安装的 Ollama 隔离，不依赖任何远程设备：
 
 ```bash
@@ -185,6 +185,19 @@ curl -X POST http://127.0.0.1:11435/api/pull -d '{"model":"qwen3.5:2b"}'
 python tools/screenshot.py -o shot.png
 python tools/vlm_bench.py --image shot.png --models qwen3.5:2b --rounds 2
 ```
+
+**远程老师（本机不跑 Ollama 时）：** 设置环境变量 `GAME_SENSEI_TEACHER_URL` 指向局域网内
+另一台跑 Ollama 的机器，`helper`、`video` 与 `tools/` 下全部工具会自动跟随，无需逐个传参：
+
+```bash
+# PowerShell（当前会话有效）
+$env:GAME_SENSEI_TEACHER_URL = "http://100.66.1.2:11434"
+
+# bash
+export GAME_SENSEI_TEACHER_URL=http://100.66.1.2:11434
+```
+
+优先级：**命令行显式传参（`-teacher-url` / `--url` / `--host`）> 环境变量 `GAME_SENSEI_TEACHER_URL` > 内置默认 `http://127.0.0.1:11435`**。
 
 **实测选型（RTX 3060 12GB，1920×1080 截图，同一提示词，均为本机 11435 实例）：**
 
@@ -224,7 +237,7 @@ go run ./cmd/helper -frames 3000 -teacher \
 | 参数 | 说明 |
 |---|---|
 | `-teacher` | 启用异步教学回路（默认关，避免无人值守时白烧算力） |
-| `-teacher-url` / `-teacher-model` | 老师地址与模型，默认本机 `11435` + `qwen3.5:9b` |
+| `-teacher-url` / `-teacher-model` | 老师地址与模型。地址默认取环境变量 `GAME_SENSEI_TEACHER_URL`（见 §9.1），未设置则为本机 `11435`；模型默认 `qwen3.5:9b` |
 | `-eval-every` | 每 N 帧抽一帧；30FPS 下 `300` ≈ 每 10 秒一帧 |
 | `-eval-frames` | 攒够多少帧送审一次（`6` ≈ 覆盖 1 分钟） |
 | `-eval-width` | 送审帧降采样宽度（`640`，比学生输入的 160 宽，让老师看清界面） |

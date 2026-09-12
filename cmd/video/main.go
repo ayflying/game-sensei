@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ayflying/game-sensei/internal/config"
 	"github.com/ayflying/game-sensei/internal/game"
 	"github.com/ayflying/game-sensei/internal/teacher"
 	"github.com/ayflying/game-sensei/internal/video"
@@ -60,7 +61,7 @@ func main() {
 		quiet     = flag.Bool("quiet", false, "不显示 ffmpeg 抽帧进度")
 
 		annotate     = flag.Bool("annotate", false, "抽帧后交给老师 VLM 逐段判读")
-		teacherURL   = flag.String("teacher-url", "http://127.0.0.1:11435", "老师地址（Ollama）")
+		teacherURL   = flag.String("teacher-url", config.DefaultTeacherURL(), "老师地址（Ollama）。默认取环境变量 GAME_SENSEI_TEACHER_URL，未设置则为本机 11435")
 		teacherModel = flag.String("teacher-model", "qwen3.5:9b", "老师模型")
 		annLimit     = flag.Int("annotate-limit", 0, "最多判读多少段（0=全部），用于先试水")
 		gameSpec     = flag.String("game", "", "游戏档案名或路径，提供按钮清单与界面先验")

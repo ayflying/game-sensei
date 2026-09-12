@@ -18,7 +18,10 @@ import sys
 import time
 import urllib.request
 
-DEFAULT_URL = "http://127.0.0.1:11435/api/chat"
+# 老师地址：环境变量 GAME_SENSEI_TEACHER_URL 优先（如 http://100.66.1.2:11434），
+# 未设置则用本机项目自带实例
+DEFAULT_URL = os.environ.get("GAME_SENSEI_TEACHER_URL",
+                             "http://127.0.0.1:11435").rstrip("/") + "/api/chat"
 
 # 洛克王国：世界 的界面元素先验，写进提示词让模型有的放矢
 GAME_PRIOR = """你在看手机游戏《洛克王国：世界》(Roco Kingdom: World) 的横屏截图。

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -88,7 +89,9 @@ def ask(base_url: str, model: str, image_b64: str, prompt: str,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Ollama VLM 评测")
-    ap.add_argument("--host", default="http://127.0.0.1:11435", help="Ollama 地址")
+    ap.add_argument("--host", default=os.environ.get("GAME_SENSEI_TEACHER_URL",
+                                                     "http://127.0.0.1:11435"),
+                    help="Ollama 地址（默认取环境变量 GAME_SENSEI_TEACHER_URL）")
     ap.add_argument("--image", required=True, help="测试截图路径")
     ap.add_argument("--models", nargs="+", required=True, help="模型名，可多个")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)

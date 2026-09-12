@@ -83,7 +83,8 @@ func main() {
 	flag.IntVar(&cfg.ReportEvery, "report", cfg.ReportEvery, "每 N 帧打印一次统计")
 
 	flag.BoolVar(&cfg.TeacherEnabled, "teacher", cfg.TeacherEnabled, "启用老师（异步教学回路）")
-	flag.StringVar(&cfg.TeacherURL, "teacher-url", cfg.TeacherURL, "老师服务地址（Ollama）")
+	teacherURLFlag := flag.String("teacher-url", cfg.TeacherURL,
+		"老师服务地址（Ollama）。默认取环境变量 "+config.EnvTeacherURL+"，未设置则为本机 11435")
 	flag.StringVar(&cfg.TeacherModel, "teacher-model", cfg.TeacherModel, "老师模型名")
 	flag.IntVar(&cfg.EvalEvery, "eval-every", cfg.EvalEvery, "每 N 帧抽一帧送审")
 	flag.IntVar(&cfg.EvalFrames, "eval-frames", cfg.EvalFrames, "一次评估覆盖的关键帧数")
@@ -129,6 +130,18 @@ func main() {
 	})
 	if !fpsSet && cfg.Target == "android" {
 		cfg.TargetFPS = 5
+	}
+	// -teacher-url 优先级：显式传参 > 环境变量 > 内置默认。
+	// flag 的默认值已在 parse 前从环境变量取好（config.DefaultTeacherURL），
+	// parse 后把结果写回；只有用户真的传了 flag 才覆盖——否则保持环境变量值。
+	teacherURLSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "teacher-url" {
+			teacherURLSet = true
+		}
+	})
+	if teacherURLSet {
+		cfg.TeacherURL = *teacherURLFlag
 	}
 
 	if cfg.TargetFPS <= 0 {

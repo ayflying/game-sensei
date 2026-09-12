@@ -18,7 +18,9 @@ import re
 import time
 import urllib.request
 
-URL = "http://127.0.0.1:11435/api/chat"
+# 老师地址：环境变量 GAME_SENSEI_TEACHER_URL 优先，未设置则用本机项目自带实例
+URL = os.environ.get("GAME_SENSEI_TEACHER_URL",
+                     "http://127.0.0.1:11435").rstrip("/") + "/api/chat"
 
 # 界面先验：必须给，否则模型会乱猜（实测长提示退化成坐标数组就是先验太弱）
 PRIOR = """你是手机游戏《洛克王国：世界》的实时操作助手。这是一款 3D 开放世界精灵收集游戏。

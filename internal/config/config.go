@@ -2,7 +2,16 @@
 // Phase 0 使用内置默认值 + 命令行覆盖；后续 Phase 可切换为 YAML/JSON。
 package config
 
-import "time"
+import (
+	"os"
+	"strings"
+	"time"
+)
+
+// EnvTeacherURL 老师服务地址的环境变量名。
+// 本机不跑 Ollama 时，把它设成局域网内另一台机器的 base URL
+// （如 http://100.66.1.2:11434），helper / video / tools 全部跟随。
+const EnvTeacherURL = "GAME_SENSEI_TEACHER_URL"
 
 // Config 是辅助框架的全局配置。
 type Config struct {
@@ -86,6 +95,23 @@ type Config struct {
 	AppPackage string
 }
 
+// fallbackTeacherURL 是老师服务内置默认地址：本机项目自带实例（serve_ollama.sh，端口 11435）。
+const fallbackTeacherURL = "http://127.0.0.1:11435"
+
+// DefaultTeacherURL 返回老师服务默认地址，优先级：
+//
+//  1. 环境变量 GAME_SENSEI_TEACHER_URL（如 http://100.66.1.2:11434，本机不跑 Ollama 时用）
+//  2. 内置默认 http://127.0.0.1:11435
+//
+// 命令行 flag 的默认值也取这里——用户显式传 flag 时仍最高优先。
+// 各入口拿到值后应再用 flag.Visit 判断「是否显式传参」，显式传参则以 flag 为准。
+func DefaultTeacherURL() string {
+	if v := strings.TrimSpace(os.Getenv(EnvTeacherURL)); v != "" {
+		return v
+	}
+	return fallbackTeacherURL
+}
+
 // Default 返回一份安全的默认配置（dry-run，老师关闭）。
 func Default() Config {
 	return Config{
@@ -96,7 +122,7 @@ func Default() Config {
 		ReportEvery:     30,
 
 		TeacherEnabled: false,
-		TeacherURL:     "http://127.0.0.1:11435",
+		TeacherURL:     DefaultTeacherURL(),
 		TeacherModel:   "qwen3.5:9b",
 		EvalEvery:      300, // 30FPS 下约每 10 秒抽一帧
 		EvalFrames:     6,   // 6 帧 ≈ 覆盖 1 分钟
