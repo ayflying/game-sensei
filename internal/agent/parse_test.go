@@ -240,7 +240,9 @@ func TestExplainAction(t *testing.T) {
 
 func TestActionProtocol(t *testing.T) {
 	// 通用部分：不带档案时也要能给出基础动作说明
-	p := ActionProtocol(ProtocolOptions{})
+	// （AllowFreePointer 要显式开：协议的零值语义是「战斗态式收窄」，
+	//   而通用兜底协议应是全开的——两者故意相反，见 ProtocolOptions 注释。）
+	p := ActionProtocol(ProtocolOptions{AllowFreePointer: true})
 	for _, want := range []string{"ACTION TAP", "ACTION SWIPE", "ACTION HOLD",
 		"ACTION KEY", "ACTION WAIT"} {
 		if !contains(p, want) {
@@ -259,6 +261,26 @@ func TestActionProtocol(t *testing.T) {
 	// 纠结到打满思考预算（74s）仍给不出动作。
 	if contains(p, "JOYSTICK") {
 		t.Error("协议里不该出现 JOYSTICK 写法（实测会让模型陷入参数语义纠结）")
+	}
+}
+
+// AllowFreePointer=false（战斗态）必须收掉自由坐标动作：
+// pet_run10 实测老师在战斗里连点 7 步自由坐标全部空耗（Δ≈0.8），
+// 战斗界面只有按钮和技能宏是有意义的交互点。
+func TestActionProtocol_战斗态收掉自由坐标(t *testing.T) {
+	p := ActionProtocol(ProtocolOptions{
+		Buttons:          []string{"battle_flee(逃跑)", "cast_hetu(技能)"},
+		AllowFreePointer: false,
+	})
+	for _, bad := range []string{"ACTION TAP", "ACTION SWIPE", "ACTION HOLD"} {
+		if contains(p, bad) {
+			t.Errorf("战斗态协议不该列出 %s", bad)
+		}
+	}
+	for _, want := range []string{"ACTION PRESS", "ACTION KEY", "ACTION WAIT"} {
+		if !contains(p, want) {
+			t.Errorf("战斗态协议缺少 %q", want)
+		}
 	}
 }
 

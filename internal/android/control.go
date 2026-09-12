@@ -42,9 +42,14 @@ func (d *Device) TapNorm(nx, ny float64) (int, int, error) {
 }
 
 // Swipe 从 (x1,y1) 滑到 (x2,y2)，dur 为整个手势耗时。
+//
+// 超时按手势时长放宽：推摇杆一按可能就是好几秒（move 动辄 2000~3000ms），
+// 用默认 15s 掐掉会把「按住持续移动」变成「划一下就松开」——静默变味，
+// 比直接报错更难查。
 func (d *Device) Swipe(x1, y1, x2, y2 int, dur time.Duration) error {
 	ms := durMs(dur, DefaultSwipeMs)
-	_, err := d.Shell(fmt.Sprintf("input swipe %d %d %d %d %d", x1, y1, x2, y2, ms))
+	_, err := d.ShellTimeout(fmt.Sprintf("input swipe %d %d %d %d %d", x1, y1, x2, y2, ms),
+		msDuration(ms))
 	return err
 }
 
@@ -225,10 +230,25 @@ func (d *Device) WaitForeground(pkg string, timeout, interval time.Duration) err
 // 决策层无需关心运行平台。
 func (d *Device) Apply(act agent.Action) error {
 	switch act.Kind {
+	case agent.ActionNone:
+		// L1「不动，等画面变化」：手机端本来就该什么都不做，是合法动作。
+		return nil
 	case agent.ActionTap:
 		_, _, err := d.TapNorm(act.Nx, act.Ny)
 		return err
 	case agent.ActionSwipe:
+		return d.SwipeNorm(act.Nx, act.Ny, act.Nx2, act.Ny2, act.Dur)
+	case agent.ActionJoystick:
+		// L2 摇杆：从中心 (Nx,Ny) 推到目标点 (Nx2,Ny2)，用一次带时长的
+		// swipe 表达「按住并保持推杆」。
+		//
+		// ⚠️ 这一支曾经是漏的（2026-09-12 真机修复）。档案里 move.mode=joystick 时，
+		// MOVE 会被展开成 ActionJoystick，而它掉进 default 被静默吞掉：
+		// 日志照常打印「执行 move:up_right/2500ms → joy:…」、applied 计数照加、
+		// 没有任何报错，但手机上一次触摸都没发生。现象是角色一步都不走、
+		// 画面变化量恒在 1~3（只有环境动画），采集回路把整场示范都耗在
+		// 「老师反复给方向 → 世界纹丝不动 → 判定卡死 → 脱困也无效」上。
+		// 教训：设备层的 default 绝不能静默返回 nil。
 		return d.SwipeNorm(act.Nx, act.Ny, act.Nx2, act.Ny2, act.Dur)
 	case agent.ActionLongPress:
 		_, _, err := d.LongPressNorm(act.Nx, act.Ny, act.Dur)
@@ -244,7 +264,10 @@ func (d *Device) Apply(act agent.Action) error {
 		// 出现了就说明上游解析或档案配置出了问题，早暴露比悄悄吞掉好。
 		return fmt.Errorf("android: 不支持鼠标相对移动动作（ActionMouseMove）")
 	default:
-		return nil
+		// 明确报错而不是静默吞掉：动作协议里不会出现未知类型，出现了就说明
+		// 上游解析或档案配置漏了映射。静默返回 nil 会让「设备毫无反应」这一
+		// 现象被伪装成「动作执行成功」，排查成本极高（真实教训见 ActionJoystick 分支）。
+		return fmt.Errorf("android: 不支持的动作类型 %v（L1 动作应先由档案解析成 L2）", act.Kind)
 	}
 }
 

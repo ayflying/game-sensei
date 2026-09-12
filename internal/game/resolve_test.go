@@ -23,8 +23,9 @@ func TestResolve_摇杆展开(t *testing.T) {
 		t.Fatalf("Kind = %v, 期望 ActionJoystick（joystick 档案下 MOVE 应展开成推杆）", act.Kind)
 	}
 	// 起点必须是摇杆中心，终点朝上推一个 radius
-	if !approx(act.Nx, 0.21) || !approx(act.Ny, 0.69) {
-		t.Errorf("起点 = %.3f,%.3f, 期望摇杆中心 0.21,0.69", act.Nx, act.Ny)
+	// 实测值：3200x2136 平板横屏复标，摇杆中心约 [0.21, 0.79]
+	if !approx(act.Nx, 0.21) || !approx(act.Ny, 0.79) {
+		t.Errorf("起点 = %.3f,%.3f, 期望摇杆中心 0.21,0.79", act.Nx, act.Ny)
 	}
 	if !approx(act.Nx2, 0.21) {
 		t.Errorf("上推时 x 不该变，实际 %.3f", act.Nx2)
@@ -314,6 +315,10 @@ func TestProtocolOptions_空档案安全(t *testing.T) {
 	o := p.ProtocolOptions()
 	if o.HasMove || len(o.Buttons) != 0 {
 		t.Error("nil Profile 应返回零值选项")
+	}
+	// 但自由坐标必须保留：无档案时 TAP/SWIPE 是老师唯一的交互手段。
+	if !o.AllowFreePointer {
+		t.Error("nil Profile 不该收掉自由坐标动作")
 	}
 }
 

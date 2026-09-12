@@ -121,13 +121,20 @@ func (p *Profile) resolvePress(a agent.Action) (agent.Action, error) {
 	if p == nil {
 		return agent.Action{}, fmt.Errorf("game: 未加载游戏档案，无法执行 PRESS（用 -game 指定档案）")
 	}
+	// 宏是「多步序列」，不能被 Resolve 拍成单个点击。正常路径下回路会先拦截宏、
+	// 逐步展开执行，根本不会走到这里；走到了说明调用方漏了宏展开，明确报错而不是
+	// 静默点宏第一步（那正是小模型在技能盘上反复犯的错）。
+	if _, ok := p.Macro(a.Name); ok {
+		return agent.Action{}, fmt.Errorf(
+			"game: %q 是宏而非单按钮，应由回路展开执行（不能直接 Resolve）", a.Name)
+	}
 	btn, ok := p.Button(a.Name)
 	if !ok {
-		avail := strings.Join(p.ButtonNames(), "|")
+		avail := strings.Join(p.PressNames(), "|")
 		if avail == "" {
-			avail = "（该档案未定义任何按钮）"
+			avail = "（该档案未定义任何按钮或宏）"
 		}
-		return agent.Action{}, fmt.Errorf("game: 档案 %q 里没有按钮 %q；可用按钮：%s",
+		return agent.Action{}, fmt.Errorf("game: 档案 %q 里没有按钮或宏 %q；可用：%s",
 			p.Name, a.Name, avail)
 	}
 	if btn.Key != "" {
@@ -195,16 +202,50 @@ func splitKeys(s string) []string {
 // 只把该游戏真正能做的动作列出去：没有摇杆就别提 MOVE、没配按钮就别提 PRESS。
 // 让模型看见的动作空间越小越准，是提升小模型输出质量最省事的手段。
 func (p *Profile) ProtocolOptions() agent.ProtocolOptions {
+	return p.ProtocolOptionsForState("")
+}
+
+// ProtocolOptionsForState 与 ProtocolOptions 相同，但按当前界面态收窄动作空间：
+//   - battle 态：只列 State=battle 的可 PRESS 项（技能宏/捕捉/更换/背包/逃跑），
+//     并关闭 MOVE 与自由坐标（TAP/SWIPE/HOLD）——战斗界面没有摇杆也没有
+//     可自由点击的区域，pet_run10 实测老师在战斗里连点 7 步自由坐标全部空耗；
+//   - world 态或未知（""）：列出全部非 hidden 项，保留档案的移动方式。
+//
+// 只在强信号的战斗态收窄是刻意的：战斗态判据（底部≥3 个圆钮）几乎不会误判，
+// 而把「其实在战斗」误当大世界、仍给一堆世界按钮和 MOVE 的代价要大得多。
+func (p *Profile) ProtocolOptionsForState(state string) agent.ProtocolOptions {
 	if p == nil {
-		return agent.ProtocolOptions{}
+		// 无档案也要能跑：自由坐标保留（通用协议），MOVE/PRESS 无从谈起。
+		return agent.ProtocolOptions{AllowFreePointer: true}
 	}
-	return agent.ProtocolOptions{
-		Hints:    p.Hints,
-		Buttons:  p.buttonList(),
-		HasMove:  p.Move.Mode != MoveNone && p.Move.Mode != "",
-		MoveNote: p.Move.moveNote(),
-		HasZoom:  p.Zoom,
+	// 自由坐标默认放开；只有明确的战斗态才收。
+	o := agent.ProtocolOptions{
+		Hints:            p.Hints,
+		HasMove:          p.Move.Mode != MoveNone && p.Move.Mode != "",
+		MoveNote:         p.Move.moveNote(),
+		AllowFreePointer: true,
 	}
+	if normalizeState(state) == StateBattle {
+		// 战斗按钮/宏的带说明清单：复用 buttonLabel 保证格式与全量一致。
+		labels := make([]string, 0)
+		for _, b := range p.Buttons {
+			if !b.Hidden && b.State == StateBattle {
+				labels = append(labels, buttonLabel(b.Name, b.Key, b.Note, b.Aliases))
+			}
+		}
+		for _, m := range p.Macros {
+			if !m.Hidden && m.State == StateBattle {
+				labels = append(labels, buttonLabel(m.Name, "", m.Note, m.Aliases))
+			}
+		}
+		o.Buttons = labels
+		o.HasMove = false
+		o.MoveNote = ""
+		o.AllowFreePointer = false
+		return o
+	}
+	o.Buttons = p.buttonList()
+	return o
 }
 
 func clamp01(v float64) float64 {

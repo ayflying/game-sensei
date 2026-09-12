@@ -33,12 +33,6 @@ const (
 	DirDownRight Dir = "down_right"
 )
 
-// 缩放方向（只被 ActionZoom 使用，不进 AllDirs——那是 MOVE 的 8 向语义）。
-const (
-	DirIn  Dir = "in"  // 放大
-	DirOut Dir = "out" // 缩小
-)
-
 // AllDirs 是全部方向的固定顺序列表。
 // 顺序固定是为了让提示词、日志、测试输出可复现（map 遍历顺序不稳定）。
 var AllDirs = []Dir{

@@ -40,9 +40,9 @@ func TestLoad_nrc档案内容(t *testing.T) {
 	if p.Move.Mode != MoveJoystick {
 		t.Fatalf("Move.Mode = %q, 期望 joystick", p.Move.Mode)
 	}
-	// 实测值：ADB 点 (545,832) / 屏 2608x1200 → 0.209, 0.693
-	if !approx(p.Move.Center[0], 0.21) || !approx(p.Move.Center[1], 0.69) {
-		t.Errorf("摇杆中心 = %v, 期望接近 [0.21 0.69]", p.Move.Center)
+	// 实测值：3200x2136 平板横屏复标，摇杆中心约 [0.21, 0.79]
+	if !approx(p.Move.Center[0], 0.21) || !approx(p.Move.Center[1], 0.79) {
+		t.Errorf("摇杆中心 = %v, 期望接近 [0.21 0.79]", p.Move.Center)
 	}
 	// 半径没配时必须填成默认值，否则推杆幅度为 0 = 点了不动
 	if p.Move.Radius[0] <= 0 || p.Move.Radius[1] <= 0 {
