@@ -51,6 +51,23 @@ import (
 	"github.com/ayflying/game-sensei/internal/teacher"
 )
 
+// 重定向标准流到 f。
+//
+// 为什么这么简单就行：os.Stdout/os.Stderr 本身就是 *os.File 变量，
+// fmt 每次输出都重新读这个变量，直接换掉即可（进程内最小用例已验证）。
+// log 包在 init 时把 os.Stderr 的**指针值**存进了默认 logger，
+// 所以必须额外 log.SetOutput，否则 Fatal/Print 仍走旧 stderr。
+// 运行时 panic 输出写的是原始 fd 2，仍走启动方给的流——日志场景可接受。
+//
+// （曾试过 SetStdHandle+DuplicateHandle 路线：实机 PowerShell 后台场景
+// 报 "The handle is invalid"，且收益只有 panic 也落盘——不值得为它
+// 引入 kernel32 绑定，已删。）
+func redirectStd(f *os.File) {
+	os.Stdout = f
+	os.Stderr = f
+	log.SetOutput(f)
+}
+
 // printProfile 打印游戏档案摘要，让「现在按哪套操作在跑」一目了然。
 func printProfile(p *game.Profile) {
 	fmt.Printf("游戏档案: %s", p.Name)
@@ -71,7 +88,41 @@ func printProfile(p *game.Profile) {
 	if names := p.ButtonNames(); len(names) > 0 {
 		fmt.Printf("  按钮: %s\n", strings.Join(names, "、"))
 	}
+	// 宏与界面态判据单列一行：运行前一眼能确认「档案里的技能宏到底有没有加载进来」，
+	// 以及回路能不能自动区分大世界/回合战斗——这两件事没生效的话，
+	// 现象只会是「老师反复点同一个钮」，很难从日志反推。
+	if len(p.Macros) > 0 {
+		names := make([]string, 0, len(p.Macros))
+		for _, m := range p.Macros {
+			names = append(names, m.Name)
+		}
+		fmt.Printf("  宏: %s（各含 %s）\n", strings.Join(names, "、"), macroStepsSummary(p))
+	}
+	if p.CanDetectBattle() {
+		fmt.Println("  界面态: 可自动判定（大世界 / 回合战斗）")
+	}
 	fmt.Printf("  界面先验: %d 条\n", len(p.Hints))
+}
+
+// macroStepsSummary 汇总宏的步数区间，形如「2~2 步」。
+func macroStepsSummary(p *game.Profile) string {
+	lo, hi := 0, 0
+	for _, m := range p.Macros {
+		n := len(m.Steps)
+		if lo == 0 || n < lo {
+			lo = n
+		}
+		if n > hi {
+			hi = n
+		}
+	}
+	if lo == 0 && hi == 0 {
+		return "0 步"
+	}
+	if lo == hi {
+		return fmt.Sprintf("%d 步", hi)
+	}
+	return fmt.Sprintf("%d~%d 步", lo, hi)
 }
 
 func main() {
@@ -118,6 +169,8 @@ func main() {
 	overlayOn := flag.Bool("overlay", false, "PC 模式显示右下角日志浮窗（⚠️ 实测与 GDI 抓屏互斥会挂死，默认关闭）")
 	minimizeOnExit := flag.Bool("minimize-on-exit", true, "运行结束时把标题含游戏名的窗口最小化，方便看终端输出")
 	focusOnStart := flag.Bool("focus-on-start", true, "PC 模式启动时把标题含游戏名的窗口还原并切到前台（否则抓屏/按键会落到别的窗口）")
+	logFile := flag.String("log", "", "把全部 stdout 同步落盘到该文件（UTF-8）。强烈建议 android 模式使用：\n"+
+		"PowerShell 重定向会经 GBK 中间层毁掉中文、吞掉换行，统计工具直接失效")
 	flag.Parse()
 
 	// 用户未显式指定帧率时，按平台给不同默认值：ADB 截图单帧约 200~400ms，
@@ -159,6 +212,29 @@ func main() {
 	mode := "dry-run（不发送真实输入）"
 	if cfg.Live {
 		mode = "LIVE（真实输入）"
+	}
+	// 自落盘日志（-log）：进程自己以 UTF-8 写文件，不经任何 shell 编码层。
+	// 动机：Windows PowerShell 5.1 重定向原生命令输出时会用本地代码页（GBK）
+	// 解码 UTF-8 再落盘，中文毁成替换字符不说，还会吞掉部分换行——
+	// pet_run9 的日志 40 步只剩 27 个行首标记，统计工具全部失真。
+	//
+	// 实现取舍：os.Stdout 是 *os.File 具体类型，无法原地挂第二个写出端，
+	// 包级变量替换也过不了类型检查。所以 -log 模式下把 stdout 的**文件描述符**
+	// 直接 dup2 到日志文件：fmt/log 的所有输出字节级落盘，零中间层。
+	// 代价是终端不再回显——但实况采集本来就走后台 + 落盘，回显无人消费。
+	// 若要同时看终端，用 `tail -f` 或等 runstats 出结果。
+	if *logFile != "" {
+		f, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			log.Fatalf("打不开日志文件 %s: %v", *logFile, err)
+		}
+		redirectStd(f)
+		// f 的生命周期与进程一致：不 Close，靠退出时 Sync 保平安。
+		defer func() {
+			fmt.Println() // 收尾行与前面日志保持同流
+			fmt.Println("日志已保存:", *logFile)
+			_ = f.Sync()
+		}()
 	}
 	fmt.Printf("game-sensei | 模式=%s | 目标=%dFPS | 降采样宽=%dpx\n", mode, cfg.TargetFPS, cfg.DownsampleWidth)
 
@@ -258,14 +334,12 @@ func main() {
 			// 全屏感知在窗口化游戏上是双重劣化——老师的送审帧里游戏只占
 			// 一小块、学生的降采样观测里游戏只剩噪声；点击也要叠加窗口偏移。
 			// 找到窗口就把三者统一到窗口坐标系（失败不致命，退回全屏模式）。
-			// ⚠️ 矩形不是静态的：窗口可被拖动/缩放，newPCBackend 已按
-			// 关键词每帧现查，这里只做启动时的一次性确认与日志。
 			if pcb, ok := be.(*pcBackend); ok {
 				if cr, found := gamewin.ClientRectByTitle(kw); found {
-					pcb.SetWindowRegion(cr, kw)
-					fmt.Printf("感知域: 窗口客户区 %dx%d@(%d,%d)（动态跟踪，拖动/缩放窗口不失效）\n",
+					pcb.SetWindowRegion(cr)
+					fmt.Printf("感知域: 窗口客户区 %dx%d@(%d,%d)（仅截取游戏画面，点击按窗口坐标换算）\n",
 						cr.Dx(), cr.Dy(), cr.Min.X, cr.Min.Y)
-					logHook(fmt.Sprintf("窗口域 %dx%d@(%d,%d) 动态", cr.Dx(), cr.Dy(), cr.Min.X, cr.Min.Y))
+					logHook(fmt.Sprintf("窗口域 %dx%d@(%d,%d)", cr.Dx(), cr.Dy(), cr.Min.X, cr.Min.Y))
 				} else {
 					fmt.Println("⚠️  未能定位游戏窗口客户区，退回全屏感知模式")
 				}

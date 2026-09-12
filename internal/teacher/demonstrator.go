@@ -53,6 +53,29 @@ type Demonstrator struct {
 	// RepeatCount 是 PrevAction 已连续被执行的次数（1=执行过一次）。
 	// 0 或 1 时不写进提示词；≥2 时明确禁止再选同一动作。
 	RepeatCount int
+
+	// PrevKind 是 PrevAction 的动作种类（agent.ActionKind）。
+	//
+	// 为什么需要它：重复禁令**不能对移动一视同仁**。2026-09-13 洛克王国 40 步
+	// 实况暴露了后果——老师朝 up_right 连走 2 步后被提示「禁止再选它」，于是换
+	// up_left；走 2 步又被禁，于是换回 up_right。净位移≈0，整轮原地横跳。
+	//
+	// 移动是**持续型**动作：重复走同一方向通常正是对的（要走出去总得连续走）。
+	// 「走了但没进展」由回路的卡死判据（跨窗口画面变化量）兜底，不靠禁令。
+	// 因此只有**瞬时型**动作（PRESS/TAP/KEY）才套用重复禁令。
+	PrevKind agent.ActionKind
+
+	// RecentActions 是最近若干步已执行的动作串（由早到晚）。
+	//
+	// 单给 PrevAction 只能看到一步，模型察觉不到自己正在 A/B 之间反复横跳
+	// （两步之内怎么看都「没有重复」）。把最近 6~8 步摊开写进提示词，模型才有
+	// 机会识别出「我在打转」并主动换策略。提示词里最多列 recentActionPromptMax 条。
+	RecentActions []string
+
+	// UIState 是回路检测出的当前界面态（game.StateWorld / game.StateBattle）。
+	// 空串表示未知/不按态收窄。战斗态下提示词会隐藏 MOVE、只列战斗按钮与技能宏，
+	// 避免小模型在没有摇杆的回合界面里空推、或跨态去点世界按钮。
+	UIState string
 }
 
 // DemoResult 是一次示范。
@@ -72,8 +95,14 @@ func (d *Demonstrator) gameName() string {
 }
 
 // protocolOptions 合并档案先验与临时先验，得到给老师的动作协议配置。
+// 按 UIState 收窄（战斗态只给战斗项、无 MOVE、无自由坐标）。
 func (d *Demonstrator) protocolOptions() agent.ProtocolOptions {
-	o := d.Profile.ProtocolOptions() // nil Profile 安全，返回零值
+	// 零值兜底 = 全开（无档案时 TAP/SWIPE 是老师唯一的交互手段）；
+	// 有档案时由 ProtocolOptionsForState 按态决定收窄程度。
+	o := agent.ProtocolOptions{AllowFreePointer: true}
+	if d.Profile != nil {
+		o = d.Profile.ProtocolOptionsForState(d.UIState) // nil Profile 由内部兜底
+	}
 	if len(d.Hints) > 0 {
 		merged := make([]string, 0, len(o.Hints)+len(d.Hints))
 		merged = append(merged, o.Hints...)
@@ -81,6 +110,59 @@ func (d *Demonstrator) protocolOptions() agent.ProtocolOptions {
 		o.Hints = merged
 	}
 	return o
+}
+
+// recentActionPromptMax 提示词里最多列多少条最近动作。
+// 取 8：再多对「看出在打转」没有增量，只会拉长提示词、增加小模型跑偏的概率。
+const recentActionPromptMax = 8
+
+// oscWindow 横跳检测的窗口（步）。
+const oscWindow = 6
+
+// DetectOscillation 判断最近的动作是否在**少数几个动作之间来回横跳**。
+//
+// 判据：最近 oscWindow 步里出现的不同动作 ≤ 2 种，且相邻两步不同的次数 ≥ 3。
+// 直觉是「至少换了三次向、来去只有那两种」——这正是 2026-09-13 实况里
+// up_right/up_left 交替的形状（净位移≈0），而健康的连走（同一方向重复、
+// 或三个以上方向有序推进）都不会命中。
+//
+// 返回横跳涉及的两个动作（按首次出现顺序）。回路侧拿它打日志，
+// 提示词侧拿它点名告警——同一判据两处复用，避免日志与提示词结论打架。
+func DetectOscillation(recent []string) (a, b string, ok bool) {
+	if len(recent) < oscWindow {
+		return "", "", false
+	}
+	w := recent[len(recent)-oscWindow:]
+
+	var distinct []string
+	for _, s := range w {
+		found := false
+		for _, d := range distinct {
+			if d == s {
+				found = true
+				break
+			}
+		}
+		if !found {
+			distinct = append(distinct, s)
+			if len(distinct) > 2 {
+				return "", "", false
+			}
+		}
+	}
+	if len(distinct) != 2 {
+		return "", "", false
+	}
+	switches := 0
+	for i := 1; i < len(w); i++ {
+		if w[i] != w[i-1] {
+			switches++
+		}
+	}
+	if switches < 3 {
+		return "", "", false
+	}
+	return distinct[0], distinct[1], true
 }
 
 // BuildDemoPrompt 拼装「出动作」提示词。
@@ -96,13 +178,31 @@ func (d *Demonstrator) BuildDemoPrompt() string {
 	if d.Goal != "" {
 		fmt.Fprintf(&b, "\n【当前目标】%s\n", d.Goal)
 	}
+	if len(d.RecentActions) > 0 {
+		recent := d.RecentActions
+		if len(recent) > recentActionPromptMax {
+			recent = recent[len(recent)-recentActionPromptMax:]
+		}
+		fmt.Fprintf(&b, "\n【你最近的动作】（由早到晚）%s\n", strings.Join(recent, " → "))
+		if x, y, osc := DetectOscillation(d.RecentActions); osc {
+			fmt.Fprintf(&b, "注意：你最近一直在 %s 和 %s 之间来回横跳，净位移≈原地打转。"+
+				"这一步必须换策略：要么朝**同一个方向连续走**（一次 dur 给大些，比如 1500ms），"+
+				"要么去按一个你还没按过的按钮，看看有没有新界面（地图/背包/对话/靠近精灵）。\n", x, y)
+		}
+	}
 	if d.PrevAction != "" {
 		fmt.Fprintf(&b, "\n【上一步你执行的动作】%s\n", d.PrevAction)
-		if d.RepeatCount >= 2 {
+		switch {
+		case d.PrevKind == agent.ActionMove:
+			// 移动是持续型动作：不套禁令，改为要求它自证「有没有真在前进」。
+			b.WriteString("这是移动。移动本来就会重复很多次——如果画面里场景在滚动、" +
+				"主角在接近目标，就继续朝这个方向走（可以把 dur 加大到 1000~1500ms 走得更远）；" +
+				"只有当画面几乎没变化（被地形/空气墙挡住）时才换方向。\n")
+		case d.RepeatCount >= 2:
 			fmt.Fprintf(&b, "这个动作已经连续执行 %d 次了，画面却没有推进目标"+
 				"（任务计数没涨/界面没变化）。**禁止再选它**——换一个明显不同的动作，"+
 				"比如先判断画面上是否弹出了新菜单或弹窗，有 × 就关掉它。\n", d.RepeatCount)
-		} else {
+		default:
 			b.WriteString("如果画面显示这一步没有推进目标（角色没靠近目标、界面没变化），" +
 				"请换一个明显不同的动作；如果正在有效推进，就保持方向继续。\n")
 		}

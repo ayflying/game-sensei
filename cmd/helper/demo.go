@@ -26,6 +26,227 @@ import (
 // 继续跑只是在刷屏，早停早排查。
 const maxFailStreak = 5
 
+// ---- 卡死自愈（stuck escape）----
+//
+// 实测背景（2026-09-12 洛克王国：世界 / 小米平板）：老师连续给 move:up_right，
+// 角色被水晶树/岩壁挡住原地蹭，60 步里 45 步是同一个方向；而单帧 VLM 看不见
+// 「没动」这件事，于是继续给同一个方向，形成无限复读。
+//
+// 触发后两级交替上：① 档案里的脱困脚本（洛克王国 = 开地图 → 点魔力之源锚点 → 传送）；
+// ② 摇杆长推换方向。理由见下面两处 if 的注释。
+//
+// 阈值是**实测定标**出来的（2026-09-12 同场景四方向对照，见 cal_* 截图）：
+//
+//	向下推 2500ms → Δ12.29 / 向左 → Δ13.98 / 向右 → Δ12.32   ← 真在走
+//	向上推 2500ms → Δ 3.26                                   ← 被坡面挡住
+//
+// 所以「在走」与「被挡住」的分界落在 3.3~12.3 之间，取 6 足够安全。
+// 之前把阈值设成 4 是错的：当时误把「角色原地蹭」当成「缓慢推进」，
+// 结论一度是「像素差分辨不了」——标定之后发现分得干干净净。
+//
+// ⚠️ 第二次修正（2026-09-12 晚，真机采集复盘）：**必须跨窗口比较，不能比相邻两帧**。
+// 老师偏爱给 move:xxx/500ms 这种小步，500ms 移动的画面变化只有 Δ1.0~1.8，
+// 与「卡住」同级——用单步 Δ 判卡死会把正常走动全判成卡死。
+// 改成「拿当前帧和 stuckWindowSteps 步之前的帧比」后两边重新拉开：
+// 5 步（约 2.5 秒）正常走动累计位移足够大（Δ>12），卡住则仍在 3 左右。
+const (
+	// stuckDiffEps 一个卡死窗口内的画面变化量（平均像素差）低于它，
+	// 就认为这一窗口没推动世界。
+	stuckDiffEps = 6.0
+	// stuckWindowSteps 卡死判据的比较窗口（步）。与动作时长无关：
+	// 只要窗口里的累计位移够大就是「在走」，够小就是「被钉住」。
+	stuckWindowSteps = 5
+	// stuckStreakLimit 连续这么多个窗口都没推动世界，判定卡死、开始脱困。
+	stuckStreakLimit = 1
+	// escapeHoldMs 摇杆兜底脱困的推杆时长：比常规一步更长，确保走出卡点。
+	escapeHoldMs = 1800
+	// escapeLogTag 日志前缀，便于事后 grep 统计「这场示范卡了几次」。
+	escapeLogTag = "🆘"
+	// escapeScriptEvery 每这么多次脱困，才动用一次「档案脱困脚本」（地图传送）。
+	//
+	// 摇杆长推是默认手段，因为**它不依赖任何界面坐标**：换一个方向推 1800ms
+	// 就能沿障碍边缘蹭出去。档案脚本要贵得多——3 次点击 + 约 13 秒等待，
+	// 而且中间那步「点地图上的魔力之源图标」用的是固定归一化坐标，
+	// 一旦地图视野和标定时不一致就会点空，非但没脱困，还把角色留在大地图里
+	// （实测 2026-09-12 第四轮：脱困脚本开图后点空，随后 4 帧画面完全静止）。
+	// 所以脚本退居二线，只在摇杆反复推不动时才兜底。
+	escapeScriptEvery = 4
+	// recentActionWindow 回路侧保留的最近动作条数。
+	//
+	// 比提示词上限（teacher.recentActionPromptMax=8）略大：横跳判据要看到
+	// 6 步窗口，留 8 步给提示词用。多留无益，只会让老师分心。
+	recentActionWindow = 8
+)
+
+// escapeDirs 是脱困时依次尝试的方向。
+//
+// 刻意从「横向/反向」开头：卡死几乎总是因为一路朝同一侧顶，
+// 先沿障碍边缘横着挪出去，比继续往前顶有效得多。
+// 八个方向轮完一圈还没脱困就从头再来（对应「绕障碍一圈」的直觉）。
+var escapeDirs = []agent.Dir{
+	agent.DirDown, agent.DirLeft, agent.DirRight,
+	agent.DirDownLeft, agent.DirDownRight,
+	agent.DirUpLeft, agent.DirUpRight, agent.DirUp,
+}
+
+// frameDiff 返回两帧灰度图的逐像素平均绝对差（0~255）。
+//
+// 尺寸不一致或无帧时返回 255（视为「变化很大」）：宁可漏判一次卡死，
+// 也不要因为一次尺寸抖动误判、把老师的正常动作顶掉。
+func frameDiff(a, b *image.Gray) float64 {
+	if a == nil || b == nil || a.Bounds() != b.Bounds() {
+		return 255
+	}
+	bb := a.Bounds()
+	if bb.Dx() == 0 || bb.Dy() == 0 {
+		return 255
+	}
+	var sum uint64
+	for y := bb.Min.Y; y < bb.Max.Y; y++ {
+		row := y * a.Stride
+		for x := bb.Min.X; x < bb.Max.X; x++ {
+			d := int(a.Pix[row+x]) - int(b.Pix[row+x])
+			if d < 0 {
+				d = -d
+			}
+			sum += uint64(d)
+		}
+	}
+	return float64(sum) / float64(bb.Dx()*bb.Dy())
+}
+
+// runTapScript 顺序执行一条「点/拖 + 等待」脚本。
+//
+// 卡死脱困脚本与技能宏共用同一个执行内核——二者原语完全一样（在某归一化坐标
+// 点一下或拖一段，然后等界面变化），只是触发来源与日志前缀不同。每一步都已是
+// L2 的 Tap/Swipe，Apply 会幂等透传，不会再被当成命名按钮去查坐标。
+//
+// 返回 aborted=true 表示收到退出信号（调用方应立即收尾）；ok=false 表示某步执行失败。
+func runTapScript(be backend, prefix string, steps []game.MacroStep, defWait time.Duration,
+	stop <-chan os.Signal, tag string, logHook func(string)) (aborted, ok bool) {
+	for i, st := range steps {
+		wait := time.Duration(st.WaitMs) * time.Millisecond
+		if wait <= 0 {
+			wait = defWait
+		}
+		stepAct := agent.Action{Kind: agent.ActionTap, Nx: st.Pos[0], Ny: st.Pos[1]}
+		desc := fmt.Sprintf("点 %.3f,%.3f", st.Pos[0], st.Pos[1])
+		if st.To[0] != 0 || st.To[1] != 0 {
+			dragMs := st.DragMs
+			if dragMs <= 0 {
+				dragMs = 600
+			}
+			stepAct = agent.Action{
+				Kind: agent.ActionSwipe,
+				Nx:   st.Pos[0], Ny: st.Pos[1],
+				Nx2: st.To[0], Ny2: st.To[1],
+				Dur: time.Duration(dragMs) * time.Millisecond,
+			}
+			desc = fmt.Sprintf("拖 %.3f,%.3f→%.3f,%.3f/%dms", st.Pos[0], st.Pos[1], st.To[0], st.To[1], dragMs)
+		}
+		if err := be.Apply(stepAct); err != nil {
+			fmt.Printf("[%s] %s 第 %d 步执行失败: %v\n", tag, prefix, i+1, err)
+			logHook(fmt.Sprintf("%s 第 %d 步失败: %v", prefix, i+1, err))
+			return false, false
+		}
+		tail := ""
+		if st.Note != "" {
+			tail = "（" + st.Note + "）"
+		}
+		fmt.Printf("[%s] %s %d/%d %s%s\n", tag, prefix, i+1, len(steps), desc, tail)
+		select {
+		case <-stop:
+			return true, true
+		case <-time.After(wait):
+		}
+	}
+	return false, true
+}
+
+// escapeToScript 把脱困步骤转成统一脚本步骤（两种步骤字段同形）。
+func escapeToScript(in []game.EscapeStep) []game.MacroStep {
+	out := make([]game.MacroStep, 0, len(in))
+	for _, s := range in {
+		out = append(out, game.MacroStep{
+			Pos: s.Pos, To: s.To, DragMs: s.DragMs, WaitMs: s.WaitMs, Note: s.Note,
+		})
+	}
+	return out
+}
+
+// maybeRunMacro 判断动作是否为 PRESS 宏；是则展开执行其整条步骤序列。
+//
+// 返回 handled=true 表示它确实是宏（此时 aborted/ok 有意义）；handled=false
+// 表示它是普通按钮/其它动作，调用方按原路径 Resolve+Apply。宏整段只对应老师的
+// 一次决策，因此只落一条示范样本，步骤由这里确定性跑完。
+func maybeRunMacro(be backend, prof *game.Profile, act agent.Action, defWait time.Duration,
+	stop <-chan os.Signal, tag string, logHook func(string)) (handled, aborted, ok bool) {
+	if act.Kind != agent.ActionPress {
+		return false, false, true
+	}
+	m, isMacro := prof.Macro(act.Name)
+	if !isMacro {
+		return false, false, true
+	}
+	aborted, ranOK := runTapScript(be, "宏 "+m.Name, m.Steps, defWait, stop, tag, logHook)
+	return true, aborted, ranOK
+}
+
+// blackFrameMean 是「这一帧基本全黑」的灰度均值上限（0~255）。
+//
+// 实测（2026-09-12 真机排查「点了没反应」）：小米平板 screen_off_timeout=60s 且
+// stay_on_while_plugged_in=0，任何超过一分钟的停顿都会息屏。息屏后 screencap 只能
+// 拿到全黑图，而且此时 input tap/swipe 会被系统静默吞掉。黑帧不拦住会有三重危害：
+//  1. 白送老师一次推理（它看的是纯黑图，只会瞎给动作），并污染示范数据；
+//  2. 卡死判据看的是跨窗口画面差，「黑→黑」恒为 0，会被判成「被钉住」，
+//     于是触发一串毫无意义的脱困（传送/摇杆长推）——全都在黑屏上打水漂；
+//  3. 日志里看不出异常，现象只是「执行成功但世界没变」。
+//
+// 全黑帧的均值约 2~8；正常大世界/战斗画面在 60 以上，取 12 留足余量。
+const blackFrameMean = 12.0
+
+// imageMeanGray 返回一张灰度图的平均亮度（0~255）。nil 或空图返回 255（视为正常，
+// 宁可漏判一次黑屏，也不要在无帧时误判息屏而打乱主循环）。
+func imageMeanGray(g *image.Gray) float64 {
+	if g == nil {
+		return 255
+	}
+	b := g.Bounds()
+	if b.Dx() == 0 || b.Dy() == 0 {
+		return 255
+	}
+	var sum uint64
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		row := y * g.Stride
+		for x := b.Min.X; x < b.Max.X; x++ {
+			sum += uint64(g.Pix[row+x])
+		}
+	}
+	return float64(sum) / float64(b.Dx()*b.Dy())
+}
+
+// appendRecent 把 v 追加到历史尾部，并只保留最后 capN 条。
+//
+// 「只保留最后 N 条」而不是无限累积：卡死/脱困几轮之后，老师真正需要的
+// 只是最近几步的上下文；无限累积既浪费 token，也会让早期无关动作干扰判断。
+//
+// 结果存在新底层数组里，不与入参共享——调用方常把这个切片直接交给老师，
+// 而后续的 append 可能原地改写底层数组，共享会导致「提示词里的历史被追改」
+// 这种极难排查的串味 bug。
+func appendRecent(history []string, v string, capN int) []string {
+	if capN <= 0 {
+		return []string{v}
+	}
+	start := 0
+	if len(history) >= capN {
+		start = len(history) - capN + 1
+	}
+	out := make([]string, 0, capN)
+	out = append(out, history[start:]...)
+	out = append(out, v)
+	return out
+}
+
 // runDemo 是「老师在线示范」回路（Phase 2 的第一块）。
 //
 // 与 Phase 1 的 teachLoop 有本质区别：
@@ -81,6 +302,29 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 	var parsedOK, applied, failStreak int
 	var prevAction string
 	var prevRepeat int // prevAction 已连续执行的次数（喂给老师做重复禁令）
+	// prevKind 是 prevAction 的动作种类。重复禁令按它分流：移动不受禁令
+	// （见 repeatForceSwitchMove 与 Demonstrator.PrevKind 的注释）。
+	var prevKind agent.ActionKind
+	// recentActions 是最近已执行的动作串（由早到晚，最多 recentActionWindow 条）。
+	// 单给老师「上一步」时它察觉不到自己在 A/B 之间横跳——两步之间看不出重复。
+	recentActions := make([]string, 0, recentActionWindow)
+	// oscActive 记录「老师当前是否处于横跳状态」，用于把横跳日志压成一次。
+	var oscActive bool
+	// 画面变化量有两个口径：
+	//   diff  —— 相邻两步，只用于日志（老师爱给 500ms 小步，这个值天生很小）
+	//   windowDiff —— 当前帧 vs stuckWindowSteps 步前的锚点帧，卡死判据看它
+	var prevGray *image.Gray  // 上一步的学生观测
+	var anchorGray *image.Gray // 卡死窗口的锚点帧
+	var anchorStep int        // 锚点帧所在的步号
+	var windowDiff float64    // 一个窗口内的画面变化量（卡死判据用）
+	var stuckStreak int       // 连续多少个窗口没推动世界
+	var escapeIdx int         // 摇杆兜底脱困的方向轮换游标
+	var escapeAttempt int     // 脱困次数：奇数轮跑档案脚本、偶数轮摇杆长推
+	var inBattle bool         // 当前帧是否处于回合战斗态（底部 5 圆钮判据）
+	// 冷却是「两次脱困之间至少隔这么多步」。初值取 -cooldown 而不是 0：
+	// 否则开局前 cooldown 步里 1-lastEscapeStep < cooldown，明明卡住也不脱困
+	// （实测：老师连发 15 步 up_right、Δ 全在 1~2，脱困却一次没触发）。
+	lastEscapeStep := -prof.EscapeCooldown()
 	for step := 1; ; step++ {
 		select {
 		case <-stop:
@@ -112,10 +356,80 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 			case <-time.After(500 * time.Millisecond):
 			}
 		}
+		// 息屏保护：见 blackFrameMean 的注释。黑帧既送不出有效动作，又会把卡死
+		// 判据喂成「跨窗口零变化」。所以先尝试唤醒；唤醒不了就跳过本步（不落样）。
+		if imageMeanGray(gray) < blackFrameMean {
+			fmt.Printf("[%s] 💤 画面几乎全黑（疑息屏/锁屏），发一次唤醒键后重取…\n", progress(step, steps))
+			logHook("⚠️ 画面全黑，疑息屏；已尝试唤醒")
+			if err := be.Apply(agent.Action{Kind: agent.ActionKey, Code: "wakeup"}); err != nil {
+				fmt.Printf("[%s] 💤 唤醒键发送失败: %v\n", progress(step, steps), err)
+			}
+			select {
+			case <-stop:
+				return finishDemo(w, &closed, parsedOK, applied)
+			case <-time.After(2 * time.Second):
+			}
+			if g2, err2 := be.Grab(cfg.DownsampleWidth); err2 == nil {
+				gray = g2
+			}
+			if imageMeanGray(gray) < blackFrameMean {
+				fmt.Printf("[%s] 💤 仍为黑屏（很可能已锁屏，需人工解锁）→ 跳过本步，不落样\n",
+					progress(step, steps))
+				logHook("⚠️ 仍黑屏，跳过本步（可能已锁屏）")
+				// 黑帧不参与卡死判据与相邻差：重置锚点，避免「黑→黑零变化」被判卡死。
+				prevGray, anchorGray, anchorStep = nil, nil, step
+				stuckStreak = 0
+				select {
+				case <-stop:
+					return finishDemo(w, &closed, parsedOK, applied)
+				case <-time.After(cfg.DemoWait):
+				}
+				continue
+			}
+			fmt.Printf("[%s] 💤 唤醒成功，继续本步\n", progress(step, steps))
+			logHook("💤 屏幕已唤醒，继续")
+		}
+		// 画面变化量：diff 是相邻两步（老师爱给 500ms 小步，这个值天生很小，
+		// 只看它会把正常走动误判成卡死），windowDiff 才是卡死判据。
+		// 两个口径的定标依据见文件头 stuckWindowSteps 的注释。
+		diff := frameDiff(prevGray, gray)
+		prevGray = gray
+		if anchorGray == nil {
+			anchorGray, anchorStep = gray, step
+		} else if step-anchorStep >= stuckWindowSteps {
+			windowDiff = frameDiff(anchorGray, gray)
+			if windowDiff < stuckDiffEps {
+				stuckStreak++
+			} else {
+				stuckStreak = 0
+			}
+			anchorGray, anchorStep = gray, step
+		}
 		color, err := be.GrabColor()
 		if err != nil {
 			return fmt.Errorf("第 %d 步抓取彩色帧失败: %w", step, err)
 		}
+		// 界面态判定（只用灰度/像素，不依赖模型）：战斗态底部有 5 个奶油色圆钮。
+		// 后续三处按态保护都读它：卡死不推摇杆、兜底不跨态轮播、提示词隐藏 MOVE。
+		wasBattle := inBattle
+		if prof.CanDetectBattle() {
+			inBattle = prof.IsBattle(color)
+			if inBattle != wasBattle {
+				msg := "进入回合战斗态（底部检测到战斗按钮排）"
+				if !inBattle {
+					msg = "回到大世界探索态（战斗按钮排消失）"
+				}
+				fmt.Printf("[%s] ⚔️  %s\n", progress(step, steps), msg)
+				logHook(msg)
+			}
+		} else {
+			inBattle = false
+		}
+		uiState := ""
+		if inBattle {
+			uiState = game.StateBattle
+		}
+		dem.UIState = uiState
 		// 2) 降采样 + JPEG 编码后送审。JPEG 而非 PNG：1024 宽下 130KB vs 1.5MB。
 		small := vision.Downscale(color, cfg.DemoWidth)
 		jpg, err := vision.EncodeJPEG(small, 88)
@@ -124,39 +438,209 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 		}
 		grayPNG := encodeGrayPNG(gray)
 
-		// 3) 问老师。超时按「本步失败」处理，不中断整段示范——
-		//    偶发一次超时不该让已经采到的数据全废。
+		// 3a) 卡死自愈：连续 stuckStreakLimit 个窗口「画面变化量低于阈值」，
+		//     说明老师给的动作压根没推动世界（角色被地形/空气墙钉住，或战斗里复读）。
+		//     此时问老师是白问——它看到的是同一张画面，只会再给一次同动作。直接接管。
 		//
-		//    复读机兜底（2026-09-12 解忧梦幻岛实测）：PrevAction 喂回 +
-		//    提示词禁令对 9B 小模型都不够硬，实测连点同一坐标 20+ 步、
-		//    甚至误开 VIP 付费弹窗。连续重复达 repeatForceSwitch 次时，
-		//    本步不信老师，直接从档案按钮里轮换一个（logHook 说明原因），
-		//    强行制造动作多样性——示范数据的价值在覆盖，不在“听话”。
+		//     战斗态与大世界走两套手段（战斗里没有摇杆，推 MOVE 是纯空操作，实测会
+		//     在战斗界面空蹭）：
+		//       战斗 → 点 battle_flee 脱离（打不过/卡住就跑，回头再来），没有该按钮就 WAIT；
+		//       世界 → 两级交替：① 档案传送脚本（每 escapeScriptEvery 次）② 摇杆长推换方向。
+		//
+		//     冷却（Cooldown）是必须的：脱困本身好几秒，
+		//     不加冷却会在脱困失败时每步都来一次，把示范回路刷成脱困演示。
+		stuck := stuckStreak >= stuckStreakLimit && step-lastEscapeStep >= prof.EscapeCooldown()
+
+		// —— 战斗态卡死：不推摇杆，优先逃跑脱离 ——
+		if stuck && inBattle {
+			escapeAttempt++
+			n := stuckStreak
+			lastEscapeStep = step
+			stuckStreak = 0
+			if _, hasFlee := prof.Button("battle_flee"); hasFlee {
+				msg := fmt.Sprintf("战斗中 %d 个窗口画面没推进（窗口Δ%.1f）→ 点逃跑脱离", n, windowDiff)
+				fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+				logHook(msg)
+				if err := be.Apply(agent.Action{Kind: agent.ActionPress, Name: "battle_flee"}); err != nil {
+					fmt.Printf("[%s] %s 战斗逃跑失败: %v\n", progress(step, steps), escapeLogTag, err)
+					logHook(fmt.Sprintf("战斗逃跑失败: %v", err))
+				}
+			} else {
+				msg := fmt.Sprintf("战斗中 %d 个窗口画面没推进且无逃跑钮 → 等待一个回合", n)
+				fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+				logHook(msg)
+			}
+			select {
+			case <-stop:
+				return finishDemo(w, &closed, parsedOK, applied)
+			case <-time.After(cfg.DemoWait):
+			}
+			// 脱困是「系统动作」而非老师示范，不落样。
+			continue
+		}
+
+		// 配比见 escapeScriptEvery：默认摇杆长推，每 N 次才跑一次地图脚本。
+		// 取模落在 N-1 上，是为了让「第一次卡死」走便宜的摇杆分支。
+		if stuck && prof.CanEscape() && escapeAttempt%escapeScriptEvery == escapeScriptEvery-1 {
+			escapeAttempt++
+			n := stuckStreak
+			lastEscapeStep = step
+			stuckStreak = 0
+			note := prof.Escape.Note
+			if note == "" {
+				note = "档案 escape 脚本"
+			}
+			tag := progress(step, steps)
+			msg := fmt.Sprintf("%d 个窗口画面没推进（窗口Δ%.1f）→ 脱困①脚本：%s", n, windowDiff, note)
+			fmt.Printf("[%s] %s %s\n", tag, escapeLogTag, msg)
+			logHook(msg)
+			aborted, _ := runTapScript(be, "脱困", escapeToScript(prof.Escape.Steps),
+				cfg.DemoWait, stop, tag, func(m string) {
+					logHook(m)
+				})
+			if aborted {
+				return finishDemo(w, &closed, parsedOK, applied)
+			}
+			// 脱困是「系统动作」而非老师示范，不落样——把它当训练样本会教坏学生
+			// （观测-动作对里那条动作根本不是老师根据画面做出的）。
+			continue
+		}
+
+		// 3a-② 脱困的物理兜底（默认手段）：上一个 if 每 escapeScriptEvery 次
+		//       才接管一次，其余情况（含档案没配脚本）都在这里换方向长推。
+		//       两级交替的意义见上一段注释：脚本依赖地图视野，可能点空；
+		//       摇杆长推不依赖任何界面坐标，保证总有一条路能真正挪动角色。
+		if stuck {
+			escapeAttempt++
+			n := stuckStreak
+			lastEscapeStep = step
+			stuckStreak = 0
+			d := escapeDirs[escapeIdx%len(escapeDirs)]
+			escapeIdx++
+			msg := fmt.Sprintf("%d 个窗口画面没推进（窗口Δ%.1f）→ 脱困②摇杆长推：朝 %s %dms",
+				n, windowDiff, d, escapeHoldMs)
+			fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+			logHook(msg)
+			if err := be.Apply(agent.Action{Kind: agent.ActionMove, Dir: d, Dur: escapeHoldMs * time.Millisecond}); err != nil {
+				fmt.Printf("[%s] %s 摇杆脱困失败: %v\n", progress(step, steps), escapeLogTag, err)
+				logHook(fmt.Sprintf("摇杆脱困失败: %v", err))
+			}
+			select {
+			case <-stop:
+				return finishDemo(w, &closed, parsedOK, applied)
+			case <-time.After(cfg.DemoWait):
+			}
+			continue
+		}
+
+		// 3b) 复读兜底：同一动作串连续 repeatForceSwitch 步但画面在变（策略打转）。
+		//     从**当前界面态合法**的 PRESS 项（按钮+宏，已剔除 hidden）里轮换一个，
+		//     强行制造动作多样性——示范数据的价值在覆盖。战斗态只在战斗项里轮换，
+		//     绝不跨态去点坐骑/跳跃（那些钮在战斗界面不存在，点了是空操作甚至误触）。
+		//
+		// ⚠️ 移动（MOVE）另算阈值：走远本来就要连续走同一方向，3 步就强换成
+		// 一个按钮等于把「赶路」打断成「原地乱按」。2026-09-13 实况即因此出现
+		// up_right/up_left 交替、40 步净位移≈0。给移动放宽到 repeatForceSwitchMove，
+		// 「走了但被挡住」由前面的卡死判据（窗口Δ）负责，不靠复读兜底。
 		const repeatForceSwitch = 3
-		if prevRepeat >= repeatForceSwitch && prof != nil && len(prof.Buttons) > 0 {
-			btn := prof.Buttons[step%len(prof.Buttons)]
-			forcedAct := agent.Action{Kind: agent.ActionPress, Name: btn.Name}
-			fmt.Printf("[%s] ⚠️  老师连续 %d 步重复 %s，本步强制换档案按钮 %s\n",
-				progress(step, steps), prevRepeat, prevAction, forcedAct.String())
-			logHook(fmt.Sprintf("强制换动作 %s（老师复读 %d 步）", forcedAct.String(), prevRepeat))
-			// 直接走执行段并落样，然后跳过老师决策进入下一步
-			expanded, expErr := be.Resolve(forcedAct)
-			if forcedAct.String() == prevAction {
+		const repeatForceSwitchMove = 8
+		forceLimit := repeatForceSwitch
+		if prevKind == agent.ActionMove {
+			forceLimit = repeatForceSwitchMove
+		}
+		var forced *agent.Action
+		if prevRepeat >= forceLimit {
+			candState := game.StateWorld
+			if inBattle {
+				candState = game.StateBattle
+			}
+			candidates := prof.PressNamesForState(candState)
+			switch {
+			case len(candidates) > 0:
+				// 轮换选一个，且尽量避开正在复读的那个动作（否则等于没换）。
+				pick := candidates[step%len(candidates)]
+				if len(candidates) > 1 {
+					for k := 1; k <= len(candidates); k++ {
+						cand := candidates[(step+k)%len(candidates)]
+						if "press:"+cand != prevAction {
+							pick = cand
+							break
+						}
+					}
+				}
+				forced = &agent.Action{Kind: agent.ActionPress, Name: pick}
+				fmt.Printf("[%s] ⚠️  老师连续 %d 步重复 %s，本步强制换%s项 %s\n",
+					progress(step, steps), prevRepeat, prevAction, candState, forced.String())
+				logHook(fmt.Sprintf("强制换动作 %s（老师复读 %d 步）", forced.String(), prevRepeat))
+			case inBattle:
+				// 战斗态没有可轮换项也没有摇杆：等一个回合，让敌方/动画推进画面。
+				forced = &agent.Action{Kind: agent.ActionNone}
+				msg := fmt.Sprintf("老师连续 %d 步重复 %s、战斗态无可用替换项 → 等待一个回合",
+					prevRepeat, prevAction)
+				fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+				logHook(msg)
+			default:
+				// 大世界且档案没按钮可换：摇杆长推兜底（换方向本身就是一种脱困）。
+				d := escapeDirs[escapeIdx%len(escapeDirs)]
+				escapeIdx++
+				forced = &agent.Action{Kind: agent.ActionMove, Dir: d, Dur: escapeHoldMs * time.Millisecond}
+				msg := fmt.Sprintf("老师连续 %d 步重复 %s、档案又没按钮可换 → 强制朝 %s 长推 %dms",
+					prevRepeat, prevAction, d, escapeHoldMs)
+				fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+				logHook(msg)
+			}
+		}
+		if forced != nil {
+			act := *forced
+			// 落样里的 PrevAction 记的是「执行本步之前的那一步」，与正常分支语义一致
+			// （喂给老师的上一动作），所以要在更新 prevAction 之前先取出来。
+			prevActionBefore := prevAction
+			// 宏不能 Resolve 成单点：这里判一下，宏走多步展开，其它走普通预检/执行。
+			_, isMacro := prof.Macro(act.Name)
+			var expanded agent.Action
+			var expErr error
+			if !isMacro && act.Kind != agent.ActionNone {
+				expanded, expErr = be.Resolve(act)
+			}
+			// case 子句不支持 `:=`（只有 if/switch 头部可以），所以预检/执行
+			// 的结果都在 switch 之前算好，case 只做分类判定。
+			var applyErr error
+			if !isMacro && act.Kind != agent.ActionNone && expErr == nil {
+				applyErr = be.Apply(act)
+			}
+			if act.String() == prevAction {
 				prevRepeat++
 			} else {
 				prevRepeat = 1
 			}
-			prevAction = forcedAct.String()
-			if expErr != nil {
-				fmt.Printf("[%s] ⚠️  强制动作无法执行: %v\n", progress(step, steps), expErr)
-			} else if err := be.Apply(forcedAct); err != nil {
-				fmt.Printf("[%s] ⚠️  强制动作执行失败: %v\n", progress(step, steps), err)
-			} else {
+			prevAction = act.String()
+			prevKind = act.Kind
+			recentActions = appendRecent(recentActions, prevAction, recentActionWindow)
+			tag := progress(step, steps)
+			switch {
+			case act.Kind == agent.ActionNone:
 				applied++
-				fmt.Printf("[%s] 强制 %-20s → %-28s | %s\n",
-					progress(step, steps), forcedAct.String(), expanded.String(), agent.ExplainAction(forcedAct))
+				line := fmt.Sprintf("[%s] 兜底 %-20s | %s", tag, act.String(), agent.ExplainAction(act))
+				fmt.Println(line)
+				logHook(line)
+			case isMacro:
+				if _, aborted, ranOK := maybeRunMacro(be, prof, act, cfg.DemoWait, stop, tag, logHook); aborted {
+					return finishDemo(w, &closed, parsedOK, applied)
+				} else if ranOK {
+					applied++
+				}
+			case expErr != nil:
+				fmt.Printf("[%s] ⚠️  兜底动作无法执行: %v\n", tag, expErr)
+			case applyErr != nil:
+				fmt.Printf("[%s] ⚠️  兜底动作执行失败: %v\n", tag, applyErr)
+			default:
+				applied++
+				line := fmt.Sprintf("[%s] 兜底 %-20s → %-28s | %s",
+					tag, act.String(), expanded.String(), agent.ExplainAction(act))
+				fmt.Println(line)
+				logHook(line)
 			}
-			if err := w.Step(forcedAct, dataset.StepInfo{Raw: "(forced-switch " + forcedAct.String() + ")", PrevAction: prevAction, Parsed: true}, grayPNG, jpg, cfg.DemoColor); err != nil {
+			if err := w.Step(act, dataset.StepInfo{Raw: "(forced " + act.String() + ")", PrevAction: prevActionBefore, Parsed: true}, grayPNG, jpg, cfg.DemoColor); err != nil {
 				return fmt.Errorf("第 %d 步写示范数据失败: %w", step, err)
 			}
 			select {
@@ -167,6 +651,23 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 			continue
 		}
 		dem.PrevAction = prevAction // 把上一步喂回去，否则老师会无限重复同一动作
+		// 单单一步看不出「横跳」：模型需要最近几步才能发现自己在原地打转。
+		// 复制一份再交给老师——后面 append 会改动底层数组，这里不能共享。
+		dem.RecentActions = append([]string(nil), recentActions...)
+
+		if x, y, osc := teacher.DetectOscillation(recentActions); osc {
+			// 只在「刚开始打转」时记一次：打转期间几乎每步都命中，
+			// 逐步刷屏会把日志里真正有价值的动作行挤没。
+			if !oscActive {
+				oscActive = true
+				msg := fmt.Sprintf("老师开始横跳（%s ↔ %s，净位移≈原地）→ 提示词改策略", x, y)
+				fmt.Printf("[%s] 🔁 %s\n", progress(step, steps), msg)
+				logHook(msg)
+			}
+		} else {
+			oscActive = false
+		}
+		dem.PrevKind = prevKind
 		dem.RepeatCount = prevRepeat
 		act, res, actErr := askTeacher(cfg, dem, jpg)
 
@@ -191,10 +692,26 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 			parsedOK++
 			// 4) 展开 + 执行。
 			//
-			// 先单独展开一次只为日志：把「朝前走」显示成
+			// 普通动作先单独展开一次只为日志：把「朝前走」显示成
 			// 「摇杆 0.21,0.69 推向 0.21,0.61」，排查动作对不对时这行信息量最大。
 			// （Apply 内部还会再展开一次，展开是纯计算，代价可忽略。）
-			expanded, expErr := be.Resolve(act)
+			//
+			// 宏（PRESS cast_xxx 之类）是档案里打包好的多点脚本，Resolve 会拒绝
+			// 把它塌成单点，因此这里先判宏：宏交给 maybeRunMacro 确定性跑完，整段
+			// 只对应老师的一次决策、只落一条样本。
+			mMacro, isMacroName := prof.Macro(act.Name)
+			isMacroName = isMacroName && act.Kind == agent.ActionPress
+			var expanded agent.Action
+			var expErr error
+			if !isMacroName {
+				expanded, expErr = be.Resolve(act)
+			}
+			// 展开通过后才真正执行（宏在自己的分支里展开执行）；先把错误算出来，
+			// 下面的 switch 只负责分类与日志。
+			var applyErr error
+			if !isMacroName && expErr == nil {
+				applyErr = be.Apply(act)
+			}
 			// 无论成功与否都告诉老师「你刚给的是这个动作」，
 			// 否则失败的动作下一轮还会被重复提出。
 			// 连续重复计数：同动作 +1，换动作清零（供下一轮的重复禁令）。
@@ -204,23 +721,52 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 				prevRepeat = 1
 			}
 			prevAction = act.String()
+			prevKind = act.Kind
+			recentActions = appendRecent(recentActions, prevAction, recentActionWindow)
+			tag := progress(step, steps)
 
-			if expErr != nil {
+			switch {
+			case isMacroName:
+				_, aborted, ranOK := maybeRunMacro(be, prof, act, cfg.DemoWait, stop, tag, logHook)
+				if aborted {
+					return finishDemo(w, &closed, parsedOK, applied)
+				}
+				if !ranOK {
+					failStreak++
+					fmt.Printf("[%s] ⚠️  宏 %s 执行失败\n", tag, mMacro.Name)
+					logHook(fmt.Sprintf("⚠️ 宏 %s 执行失败", mMacro.Name))
+					if failStreak >= maxFailStreak {
+						return fmt.Errorf("连续 %d 步宏执行失败，最后宏: %s", failStreak, mMacro.Name)
+					}
+					break
+				}
+				failStreak = 0
+				applied++
+				mark := "执行宏"
+				if !be.Live() {
+					mark = "dry-run宏"
+				}
+				line := fmt.Sprintf("[%s] %s %-16s（%d 步）| %s | Δ%.1f | %.1fs %dtok",
+					tag, mark, act.String(), len(mMacro.Steps),
+					agent.ExplainAction(act), diff, info.LatencyMs/1000, info.OutTokens)
+				fmt.Println(line)
+				logHook(line)
+			case expErr != nil:
 				// 展开失败通常是配置问题：档案里没有这个按钮、斜向没配键位。
 				failStreak++
-				fmt.Printf("[%s] ⚠️  动作无法执行: %v\n", progress(step, steps), expErr)
+				fmt.Printf("[%s] ⚠️  动作无法执行: %v\n", tag, expErr)
 				logHook(fmt.Sprintf("⚠️ 动作无法执行: %v", expErr))
 				if failStreak >= maxFailStreak {
 					return fmt.Errorf("连续 %d 步动作无法执行，最后错误: %w", failStreak, expErr)
 				}
-			} else if err := be.Apply(act); err != nil {
+			case applyErr != nil:
 				failStreak++
-				fmt.Printf("[%s] ⚠️  执行失败: %v\n", progress(step, steps), err)
-				logHook(fmt.Sprintf("⚠️ 执行失败: %v", err))
+				fmt.Printf("[%s] ⚠️  执行失败: %v\n", tag, applyErr)
+				logHook(fmt.Sprintf("⚠️ 执行失败: %v", applyErr))
 				if failStreak >= maxFailStreak {
-					return fmt.Errorf("连续 %d 步执行失败，最后错误: %w", failStreak, err)
+					return fmt.Errorf("连续 %d 步执行失败，最后错误: %w", failStreak, applyErr)
 				}
-			} else {
+			default:
 				failStreak = 0
 				applied++
 				mark := "执行"
@@ -231,10 +777,12 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 				if step > 1 && act.String() == info.PrevAction {
 					repeat = " ⚠️与上一步相同"
 				}
-				// L1 → L2 都打出来：左边是模型的意图，右边是最终落到设备上的操作
-				line := fmt.Sprintf("[%s] %s %-20s → %-28s | %s | %.1fs %dtok%s",
-					progress(step, steps), mark, act.String(), expanded.String(),
-					agent.ExplainAction(act), info.LatencyMs/1000, info.OutTokens, repeat)
+			// L1 → L2 都打出来：左边是模型的意图，右边是最终落到设备上的操作。
+			// 末尾 Δ 是相对上一步的画面变化量（诊断用；卡死判据看的是跨窗口的
+			// windowDiff，因为老师常给 500ms 小步，单步 Δ 天生就小）。
+				line := fmt.Sprintf("[%s] %s %-20s → %-28s | %s | Δ%.1f | %.1fs %dtok%s",
+					tag, mark, act.String(), expanded.String(),
+					agent.ExplainAction(act), diff, info.LatencyMs/1000, info.OutTokens, repeat)
 				fmt.Println(line)
 				logHook(line)
 			}
