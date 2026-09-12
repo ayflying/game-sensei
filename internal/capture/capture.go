@@ -164,6 +164,59 @@ func GrabColor() (image.Image, error) {
 	return dst, nil
 }
 
+// clipBGRA 从整屏 BGRA 缓冲里裁出 region 子矩形，返回新缓冲与子图宽高。
+//
+// 为什么需要它：窗口化游戏只占屏幕一小块（如 427x782 的微信小游戏嵌在
+// 1920x1080 桌面里）。全屏感知有两个代价——①老师看到的游戏只占画面 28%，
+// 降采样后界面元素糊成一团；②学生观测 160px 宽里游戏只剩 45px，全是噪声。
+// 裁剪让「感知域」与「点击域」都收敛到游戏窗口内，坐标换算也更简单。
+func clipBGRA(bgra []byte, w, h int, region image.Rectangle) ([]byte, int, int, error) {
+	r := region.Intersect(image.Rect(0, 0, w, h))
+	if r.Empty() {
+		return nil, 0, 0, fmt.Errorf("capture: 裁剪区域 %s 与屏幕 %dx%d 无交集", region, w, h)
+	}
+	cw, ch := r.Dx(), r.Dy()
+	out := make([]byte, cw*ch*4)
+	for y := 0; y < ch; y++ {
+		srcRow := (r.Min.Y+y)*w*4 + r.Min.X*4
+		copy(out[y*cw*4:(y+1)*cw*4], bgra[srcRow:srcRow+cw*4])
+	}
+	return out, cw, ch, nil
+}
+
+// GrabRegion 抓取主屏的 region 子区域并返回灰度图（downWidth 语义同 Grab）。
+func GrabRegion(region image.Rectangle, downWidth int) (*image.Gray, error) {
+	buf, w, h, err := grabBGRA()
+	if err != nil {
+		return nil, err
+	}
+	cbuf, cw, ch, err := clipBGRA(buf, w, h, region)
+	if err != nil {
+		return nil, err
+	}
+	return toGrayDownsampled(cbuf, cw, ch, downWidth), nil
+}
+
+// GrabColorRegion 抓取主屏的 region 子区域并返回全分辨率彩色图。
+func GrabColorRegion(region image.Rectangle) (image.Image, error) {
+	buf, w, h, err := grabBGRA()
+	if err != nil {
+		return nil, err
+	}
+	cbuf, cw, ch, err := clipBGRA(buf, w, h, region)
+	if err != nil {
+		return nil, err
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, cw, ch))
+	for i, j := 0, 0; i < len(cbuf); i, j = i+4, j+4 {
+		dst.Pix[j] = cbuf[i+2]
+		dst.Pix[j+1] = cbuf[i+1]
+		dst.Pix[j+2] = cbuf[i]
+		dst.Pix[j+3] = 255
+	}
+	return dst, nil
+}
+
 // toGrayDownsampled 将 BGRA 字节流转为灰度图；downWidth<=0 时保持原尺寸。
 // 采用整数加权（BT.601 近似），避免浮点开销。
 func toGrayDownsampled(bgra []byte, w, h, downWidth int) *image.Gray {

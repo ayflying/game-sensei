@@ -23,6 +23,7 @@ package input
 
 import (
 	"fmt"
+	"image"
 	"sync"
 	"syscall"
 	"time"
@@ -150,9 +151,16 @@ func vkToScan(vk uint16) uint16 {
 type Actuator struct {
 	Live bool
 
-	// Screen 返回主屏像素尺寸，供归一化坐标换算成鼠标绝对位置。
+	// Screen 返回「归一化坐标的基准域」尺寸，供归一化坐标换算成像素。
 	// 为 nil 时点击类动作会明确报错，而不是点到 (0,0) 去。
 	Screen func() (w, h int, err error)
+
+	// Offset 是归一化域原点在屏幕坐标系下的偏移（窗口模式的窗口左上角）。
+	//
+	// 窗口化游戏里，归一化坐标以窗口客户区为基准（Screen 返回窗口尺寸），
+	// 但 SetCursorPos 要的是屏幕绝对坐标——pixel() 算出域内像素后加上
+	// Offset 才是真正该点的位置。全屏模式 Offset 为零值，行为不变。
+	Offset image.Point
 
 	mu sync.Mutex
 	// gen 记录每个键的「按住代次」：只有最新代次的协程才有权抬起按键，
@@ -300,7 +308,7 @@ func (a *Actuator) pixel(nx, ny float64) (int, int, error) {
 	}
 	x := int(nx * float64(w))
 	y := int(ny * float64(h))
-	// 夹紧到屏幕内：越界点击会被系统丢弃，宁可靠边也不要丢
+	// 夹紧到域内：越界点击会被系统丢弃，宁可靠边也不要丢
 	if x < 0 {
 		x = 0
 	}
@@ -313,7 +321,8 @@ func (a *Actuator) pixel(nx, ny float64) (int, int, error) {
 	if y > h-1 {
 		y = h - 1
 	}
-	return x, y, nil
+	// 域内像素 → 屏幕绝对坐标（窗口模式加窗口偏移；全屏模式偏移为零）
+	return x + a.Offset.X, y + a.Offset.Y, nil
 }
 
 // holdKey 按下键并在 d 之后抬起；期间同键的新请求会延长按住时间。

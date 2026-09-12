@@ -110,7 +110,11 @@ func main() {
 	flag.StringVar(&cfg.Game, "game", cfg.Game,
 		"游戏档案：档案名（如 nrc、pc_generic）或 JSON 路径；空=不带游戏知识")
 	// ---- PC 实测体验：日志浮窗 + 退出最小化游戏 ----
-	overlayOn := flag.Bool("overlay", true, "PC 模式在屏幕右下角显示置顶日志浮窗（对截屏不可见，不污染感知）")
+	// ⚠️ 浮窗默认关闭（2026-09-12 实测）：浮窗开启时第一次「Hide→BitBlt→Show」
+	// 会整进程挂死（探针 overlayprobe 复现，卡在 GDI/ShowWindow 交互，
+	// 具体是 user32 内部锁还是 DIB 冲突未深究）。demo/教学模式必须关。
+	// 需要 watch 日志就用 stdout 重定向：... > run.log 2>&1 后 tail -f。
+	overlayOn := flag.Bool("overlay", false, "PC 模式显示右下角日志浮窗（⚠️ 实测与 GDI 抓屏互斥会挂死，默认关闭）")
 	minimizeOnExit := flag.Bool("minimize-on-exit", true, "运行结束时把标题含游戏名的窗口最小化，方便看终端输出")
 	focusOnStart := flag.Bool("focus-on-start", true, "PC 模式启动时把标题含游戏名的窗口还原并切到前台（否则抓屏/按键会落到别的窗口）")
 	flag.Parse()
@@ -236,6 +240,21 @@ func main() {
 				fmt.Printf("未找到标题含 %q 的窗口——游戏可能还没启动\n", kw)
 				logHook("没找到游戏窗口，等待启动…")
 			}
+			// 窗口化游戏：把感知与点击收敛到窗口客户区。
+			//
+			// 全屏感知在窗口化游戏上是双重劣化——老师的送审帧里游戏只占
+			// 一小块、学生的降采样观测里游戏只剩噪声；点击也要叠加窗口偏移。
+			// 找到窗口就把三者统一到窗口坐标系（失败不致命，退回全屏模式）。
+			if pcb, ok := be.(*pcBackend); ok {
+				if cr, found := gamewin.ClientRectByTitle(kw); found {
+					pcb.SetWindowRegion(cr)
+					fmt.Printf("感知域: 窗口客户区 %dx%d@(%d,%d)（仅截取游戏画面，点击按窗口坐标换算）\n",
+						cr.Dx(), cr.Dy(), cr.Min.X, cr.Min.Y)
+					logHook(fmt.Sprintf("窗口域 %dx%d@(%d,%d)", cr.Dx(), cr.Dy(), cr.Min.X, cr.Min.Y))
+				} else {
+					fmt.Println("⚠️  未能定位游戏窗口客户区，退回全屏感知模式")
+				}
+			}
 		}
 	}
 
@@ -321,7 +340,7 @@ func main() {
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 		logHook("示范模式启动（" + mode + "）")
-		if err := runDemo(cfg, be, dem, stop, logHook); err != nil {
+		if err := runDemo(cfg, be, dem, prof, stop, logHook); err != nil {
 			log.Fatalf("示范回路异常: %v", err)
 		}
 		return
@@ -437,6 +456,9 @@ func runLoop(cfg config.Config, tick time.Duration, actor agent.Actor,
 			GrayMean:  meanGray(frame),
 		}
 		traj.Push(rec)
+		// 学生调试：每个动作打一行（30FPS 下每秒 30 行，量可控；
+		// 与老师 demo 的日志格式对齐，便于 grep 统计动作分布）。
+		fmt.Printf("[%4d] %s\n", n, act.String())
 		select {
 		case frameCh <- rec:
 		default: // 统计协程积压时丢弃，不影响实时回路

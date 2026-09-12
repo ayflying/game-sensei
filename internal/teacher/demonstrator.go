@@ -43,7 +43,16 @@ type Demonstrator struct {
 	// 保留它是因为它仍是正确的接口设计（多帧示范时迟早要用到），
 	// 但别指望它单独解决问题——真正的解法是让动作空间本身更适合小模型
 	// （见 agent.ActionProtocol 与游戏档案的 MOVE/PRESS 设计）。
+	//
+	// 2026-09-12 补充（解忧梦幻岛实测）：纯点击游戏上连喂 PrevAction
+	// 依然复读同一坐标 20+ 步，误点了 VIP 图标弹出付费弹窗。新增
+	// RepeatCount：把「已连续重复 N 次」直接写进提示词并禁止再选同一
+	// 动作——对「画面没变化 + 明确禁令」的场景，这是实测必要的最小干预。
 	PrevAction string
+
+	// RepeatCount 是 PrevAction 已连续被执行的次数（1=执行过一次）。
+	// 0 或 1 时不写进提示词；≥2 时明确禁止再选同一动作。
+	RepeatCount int
 }
 
 // DemoResult 是一次示范。
@@ -89,8 +98,14 @@ func (d *Demonstrator) BuildDemoPrompt() string {
 	}
 	if d.PrevAction != "" {
 		fmt.Fprintf(&b, "\n【上一步你执行的动作】%s\n", d.PrevAction)
-		b.WriteString("如果画面显示这一步没有推进目标（角色没靠近目标、界面没变化），" +
-			"请换一个明显不同的动作；如果正在有效推进，就保持方向继续。\n")
+		if d.RepeatCount >= 2 {
+			fmt.Fprintf(&b, "这个动作已经连续执行 %d 次了，画面却没有推进目标"+
+				"（任务计数没涨/界面没变化）。**禁止再选它**——换一个明显不同的动作，"+
+				"比如先判断画面上是否弹出了新菜单或弹窗，有 × 就关掉它。\n", d.RepeatCount)
+		} else {
+			b.WriteString("如果画面显示这一步没有推进目标（角色没靠近目标、界面没变化），" +
+				"请换一个明显不同的动作；如果正在有效推进，就保持方向继续。\n")
+		}
 	}
 	b.WriteString("\n先判断三件事（不要写出来）：主角在画面什么位置、" +
 		"目标在哪一侧、当前是自由探索还是对话/菜单。然后据此输出动作。\n")

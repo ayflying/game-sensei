@@ -43,6 +43,9 @@ type weightsFile struct {
 		Classes []string `json:"classes"`
 	} `json:"arch"`
 	Weights map[string][]float32 `json:"weights"`
+	Meta    struct {
+		ValAcc float64 `json:"val_acc"`
+	} `json:"meta"`
 }
 
 // Net 是加载好的学生网络。
@@ -85,6 +88,7 @@ func Load(path string) (*Net, error) {
 	}
 	w := f.Weights
 	n := &Net{hidden: f.Arch.Hidden}
+	n.meta.valAcc = f.Meta.ValAcc
 	need := map[string]int{
 		"conv1_w": 8 * 1 * 9, "conv1_b": 8,
 		"conv2_w": 16 * 8 * 9, "conv2_b": 16,

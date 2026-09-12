@@ -27,6 +27,8 @@ var (
 	procBringWindowToTop      = user32.NewProc("BringWindowToTop")
 	procGetForegroundWindow   = user32.NewProc("GetForegroundWindow")
 	procGetWindowRect         = user32.NewProc("GetWindowRect")
+	procGetClientRect         = user32.NewProc("GetClientRect")
+	procClientToScreen        = user32.NewProc("ClientToScreen")
 	procGetWindowThreadProcId = user32.NewProc("GetWindowThreadProcessId")
 	procIsIconic              = user32.NewProc("IsIconic")
 	procAttachThreadInput     = user32.NewProc("AttachThreadInput")
@@ -226,9 +228,33 @@ func focusWindow(hwnd uintptr) bool {
 	return now == hwnd
 }
 
+// ClientRectByTitle 返回标题含 keyword 的第一个可见窗口的**客户区**矩形
+// （屏幕坐标系）。找不到返回 ok=false。
+//
+// 为什么用客户区而不是窗口矩形：窗口矩形含标题栏和边框（427x782 的游戏
+// 窗口实际 Bounds 是 443x827 之类），截进来会拍到系统边框甚至标题栏的 ×，
+// 而点击/感知坐标系应该和「游戏画面」对齐。
+func ClientRectByTitle(keyword string) (image.Rectangle, bool) {
+	for _, w := range FindByTitle(keyword) {
+		if !w.Visible {
+			continue
+		}
+		var r struct{ left, top, right, bottom int32 }
+		procGetClientRect.Call(w.HWND, uintptr(unsafe.Pointer(&r)))
+		if r.right <= r.left || r.bottom <= r.top {
+			continue
+		}
+		// 客户区原点在屏幕坐标系下的位置
+		var pt struct{ x, y int32 }
+		procClientToScreen.Call(w.HWND, uintptr(unsafe.Pointer(&pt)))
+		cw, ch := r.right-r.left, r.bottom-r.top
+		return image.Rect(int(pt.x), int(pt.y), int(pt.x)+int(cw), int(pt.y)+int(ch)), true
+	}
+	return image.Rectangle{}, false
+}
+
 // ForegroundTitle 返回当前前台窗口的标题（调试用：确认按键会落到哪个窗口）。
-func ForegroundTitle() string {
-	h, _, _ := procGetForegroundWindow.Call()
+func ForegroundTitle() string {	h, _, _ := procGetForegroundWindow.Call()
 	if h == 0 {
 		return ""
 	}

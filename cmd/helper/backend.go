@@ -65,7 +65,8 @@ func (r actionResolver) Profile() *game.Profile { return r.profile }
 
 func newPCBackend(prof *game.Profile, live bool) *pcBackend {
 	act := input.NewActuator(live)
-	// 注入屏幕尺寸：点击类动作要把归一化坐标换算成鼠标绝对位置。
+	// 注入点击域尺寸：点击类动作要把归一化坐标换算成鼠标绝对位置。
+	// 全屏模式下是桌面尺寸；SetWindowRegion 后会换成窗口尺寸（见该函数）。
 	// 不注入的话点击会明确报错，而不是点到 (0,0) 去。
 	act.Screen = func() (int, int, error) {
 		r, err := capture.Bounds()
@@ -77,10 +78,36 @@ func newPCBackend(prof *game.Profile, live bool) *pcBackend {
 	return &pcBackend{actionResolver: actionResolver{profile: prof}, actuator: act}
 }
 
+// SetWindowRegion 把 PC 后端的「感知 + 点击」域收敛到窗口矩形内。
+//
+// 空矩形 = 清除裁剪，回到全屏模式。
+//
+// 为什么要有这一层：窗口化游戏（如微信小游戏 427x782）只占桌面一小块，
+// 全屏感知下老师的送审帧里游戏只占 28%、学生的 160px 观测里只剩 45px 噪声；
+// 点击坐标若按全屏换算，档案里的归一化值还要叠加窗口偏移。收敛到窗口后
+// 三者共享同一坐标系：截的是窗口、看的只有游戏、归一化坐标直接乘窗口宽高。
+func (b *pcBackend) SetWindowRegion(r image.Rectangle) {
+	b.region = r
+	if r.Empty() {
+		b.actuator.Offset = image.Point{}
+		return
+	}
+	b.actuator.Offset = r.Min
+	// 点击域尺寸换成窗口客户区尺寸，归一化坐标的换算基准与感知域一致。
+	b.actuator.Screen = func() (int, int, error) {
+		return r.Dx(), r.Dy(), nil
+	}
+}
+
+// windowRegion 返回当前生效的裁剪矩形（空 = 全屏）。
+func (b *pcBackend) windowRegion() image.Rectangle { return b.region }
+
 // pcBackend 控制本机：GDI 抓屏 + SendInput 键鼠。
 type pcBackend struct {
 	actionResolver
 	actuator *input.Actuator
+	// region 非空时：感知与点击都限制在窗口矩形内（屏幕坐标系）。
+	region image.Rectangle
 	// beforeShot/afterShot 在每次抓屏前后调用（抓屏时隐藏日志浮窗，
 	// 避免 WDA 在 GDI 截屏里留下黑块污染老师/学生的感知）。可为 nil。
 	beforeShot func()
@@ -99,6 +126,9 @@ func (b *pcBackend) Grab(downWidth int) (*image.Gray, error) {
 	if restore != nil {
 		defer restore()
 	}
+	if !b.region.Empty() {
+		return capture.GrabRegion(b.region, downWidth)
+	}
 	return capture.Grab(downWidth)
 }
 
@@ -106,6 +136,9 @@ func (b *pcBackend) GrabColor() (image.Image, error) {
 	restore := b.shot()
 	if restore != nil {
 		defer restore()
+	}
+	if !b.region.Empty() {
+		return capture.GrabColorRegion(b.region)
 	}
 	return capture.GrabColor()
 }
@@ -118,7 +151,12 @@ func (b *pcBackend) Apply(act agent.Action) error {
 	return b.actuator.Apply(resolved)
 }
 
+// Size 返回「感知域」尺寸：窗口模式返回窗口客户区尺寸，否则返回桌面尺寸。
+// 归一化坐标的换算基准必须与它一致——截到的是什么域，点击就换算到什么域。
 func (b *pcBackend) Size() (int, int, error) {
+	if !b.region.Empty() {
+		return b.region.Dx(), b.region.Dy(), nil
+	}
 	r, err := capture.Bounds()
 	if err != nil {
 		return 0, 0, err

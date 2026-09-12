@@ -14,6 +14,7 @@ import (
 	"github.com/ayflying/game-sensei/internal/agent"
 	"github.com/ayflying/game-sensei/internal/config"
 	"github.com/ayflying/game-sensei/internal/dataset"
+	"github.com/ayflying/game-sensei/internal/game"
 	"github.com/ayflying/game-sensei/internal/teacher"
 	"github.com/ayflying/game-sensei/internal/vision"
 )
@@ -35,7 +36,7 @@ const maxFailStreak = 5
 // 节拍由老师推理速度决定（实测 qwen3.5:9b 关思考后约 1.2s/步），
 // 动作之间再留 DemoWait 让游戏把状态变完——否则下一帧拍的还是旧画面，
 // 老师会基于「没变的画面」重复下同一个动作。
-func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-chan os.Signal,
+func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *game.Profile, stop <-chan os.Signal,
 	logHook func(string)) error {
 	sw, sh, err := be.Size()
 	if err != nil {
@@ -79,6 +80,7 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-ch
 
 	var parsedOK, applied, failStreak int
 	var prevAction string
+	var prevRepeat int // prevAction 已连续执行的次数（喂给老师做重复禁令）
 	for step := 1; ; step++ {
 		select {
 		case <-stop:
@@ -124,7 +126,48 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-ch
 
 		// 3) 问老师。超时按「本步失败」处理，不中断整段示范——
 		//    偶发一次超时不该让已经采到的数据全废。
+		//
+		//    复读机兜底（2026-09-12 解忧梦幻岛实测）：PrevAction 喂回 +
+		//    提示词禁令对 9B 小模型都不够硬，实测连点同一坐标 20+ 步、
+		//    甚至误开 VIP 付费弹窗。连续重复达 repeatForceSwitch 次时，
+		//    本步不信老师，直接从档案按钮里轮换一个（logHook 说明原因），
+		//    强行制造动作多样性——示范数据的价值在覆盖，不在“听话”。
+		const repeatForceSwitch = 3
+		if prevRepeat >= repeatForceSwitch && prof != nil && len(prof.Buttons) > 0 {
+			btn := prof.Buttons[step%len(prof.Buttons)]
+			forcedAct := agent.Action{Kind: agent.ActionPress, Name: btn.Name}
+			fmt.Printf("[%s] ⚠️  老师连续 %d 步重复 %s，本步强制换档案按钮 %s\n",
+				progress(step, steps), prevRepeat, prevAction, forcedAct.String())
+			logHook(fmt.Sprintf("强制换动作 %s（老师复读 %d 步）", forcedAct.String(), prevRepeat))
+			// 直接走执行段并落样，然后跳过老师决策进入下一步
+			expanded, expErr := be.Resolve(forcedAct)
+			if forcedAct.String() == prevAction {
+				prevRepeat++
+			} else {
+				prevRepeat = 1
+			}
+			prevAction = forcedAct.String()
+			if expErr != nil {
+				fmt.Printf("[%s] ⚠️  强制动作无法执行: %v\n", progress(step, steps), expErr)
+			} else if err := be.Apply(forcedAct); err != nil {
+				fmt.Printf("[%s] ⚠️  强制动作执行失败: %v\n", progress(step, steps), err)
+			} else {
+				applied++
+				fmt.Printf("[%s] 强制 %-20s → %-28s | %s\n",
+					progress(step, steps), forcedAct.String(), expanded.String(), agent.ExplainAction(forcedAct))
+			}
+			if err := w.Step(forcedAct, dataset.StepInfo{Raw: "(forced-switch " + forcedAct.String() + ")", PrevAction: prevAction, Parsed: true}, grayPNG, jpg, cfg.DemoColor); err != nil {
+				return fmt.Errorf("第 %d 步写示范数据失败: %w", step, err)
+			}
+			select {
+			case <-stop:
+				return finishDemo(w, &closed, parsedOK, applied)
+			case <-time.After(cfg.DemoWait):
+			}
+			continue
+		}
 		dem.PrevAction = prevAction // 把上一步喂回去，否则老师会无限重复同一动作
+		dem.RepeatCount = prevRepeat
 		act, res, actErr := askTeacher(cfg, dem, jpg)
 
 		info := dataset.StepInfo{Raw: "", LatencyMs: 0, PrevAction: prevAction}
@@ -154,6 +197,12 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, stop <-ch
 			expanded, expErr := be.Resolve(act)
 			// 无论成功与否都告诉老师「你刚给的是这个动作」，
 			// 否则失败的动作下一轮还会被重复提出。
+			// 连续重复计数：同动作 +1，换动作清零（供下一轮的重复禁令）。
+			if act.String() == prevAction {
+				prevRepeat++
+			} else {
+				prevRepeat = 1
+			}
 			prevAction = act.String()
 
 			if expErr != nil {
