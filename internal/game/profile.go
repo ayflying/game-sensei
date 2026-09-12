@@ -204,6 +204,15 @@ func (p *Profile) CanDetectBattle() bool {
 		p.BattleDetect.Band[3] > p.BattleDetect.Band[1]
 }
 
+// CanMove 报告档案是否给了可用的移动方式（虚拟摇杆或按键）。
+//
+// 与 ProtocolOptionsForState 里 HasMove 的判据保持一致：判「能不能发 MOVE」，
+// 而不是「当前界面态允不允许」。回路的复读兜底用它分流——
+// 能移动的游戏，卡住时换方向；不能移动的游戏，只能靠换按钮。
+func (p *Profile) CanMove() bool {
+	return p != nil && p.Move.Mode != MoveNone && p.Move.Mode != ""
+}
+
 // battleDetectDefaults 填判据默认值（bright/min_pixels/min_clusters 缺省时）。
 func (d *BattleDetect) defaults() (bright, minPixels, minClusters int) {
 	bright = d.Bright

@@ -76,6 +76,14 @@ const (
 	// 比提示词上限（teacher.recentActionPromptMax=8）略大：横跳判据要看到
 	// 6 步窗口，留 8 步给提示词用。多留无益，只会让老师分心。
 	recentActionWindow = 8
+	// moveStallDiffEps 判定「这一步几乎没挪窝」的单步画面变化量阈值。
+	//
+	// 与 stuckDiffEps（跨窗口，6.0）不同量级：单步 Δ 天生小（老师爱给 500ms 小步，
+	// 正常走动也只有 1~2），所以这里只用来识别**持续**的极小 Δ（连续多步都很小）。
+	// 取 4.0：正常走动偶有低值但不会连续，撞墙则会连着很多步低于它。
+	moveStallDiffEps = 4.0
+	// moveStallStreakWarn 连续多少步「同向 + 小 Δ」就认定在撞墙（提示词据此点名换方向）。
+	moveStallStreakWarn = 2
 )
 
 // escapeDirs 是脱困时依次尝试的方向。
@@ -247,6 +255,23 @@ func appendRecent(history []string, v string, capN int) []string {
 	return out
 }
 
+// moveDirOf 从动作串里抽出移动方向，供复读兜底避免换到同一个方向。
+//
+// 动作串形如 "move:up_right/1500ms"（agent.Action.String()）；非移动动作返回 ""。
+// 只做字符串解析而不回传 Action：兜底分支手上只有动作串（prevAction），
+// 为了拿方向去反序列化整条动作没必要，也容易与 String() 的格式漂移耦合。
+func moveDirOf(action string) string {
+	const p = "move:"
+	if !strings.HasPrefix(action, p) {
+		return ""
+	}
+	rest := action[len(p):]
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
 // runDemo 是「老师在线示范」回路（Phase 2 的第一块）。
 //
 // 与 Phase 1 的 teachLoop 有本质区别：
@@ -318,6 +343,17 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 	var anchorStep int        // 锚点帧所在的步号
 	var windowDiff float64    // 一个窗口内的画面变化量（卡死判据用）
 	var stuckStreak int       // 连续多少个窗口没推动世界
+	// moveStallStreak 是「连续朝同一方向移动、但单步画面变化量都很小」的步数。
+	//
+	// 与 stuckStreak 的分工：stuckStreak 看**跨窗口**变化量（判「整段时间世界没动」），
+	// moveStallStreak 看**相邻两步**变化量（判「这一步几乎没挪窝」）。前者漏掉的正是
+	// 「顶着墙持续走」——角色/粒子动画仍在变，窗口Δ压不到阈值以下，于是脱困永不触发。
+	// 2026-09-13 pet_run12：老师 43 步 move:up_right/1500ms，单步 Δ 多次 1~3，
+	// 而窗口Δ只在 step21/56 两次跌破 6.0。把这个信号喂给老师才是解法。
+	var moveStallStreak int
+	// lastDiff 是上一步执行后的单步画面变化量（与日志里的 Δ 同源）。
+	// 既用于 moveStallStreak 判据，也喂给老师（Demonstrator.LastDiff）。
+	var lastDiff float64
 	var escapeIdx int         // 摇杆兜底脱困的方向轮换游标
 	var escapeAttempt int     // 脱困次数：奇数轮跑档案脚本、偶数轮摇杆长推
 	var inBattle bool         // 当前帧是否处于回合战斗态（底部 5 圆钮判据）
@@ -394,6 +430,23 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 		// 两个口径的定标依据见文件头 stuckWindowSteps 的注释。
 		diff := frameDiff(prevGray, gray)
 		prevGray = gray
+		// moveStallStreak：只在「上一步是移动」且「上一步后画面几乎没变」时累加。
+		// 判据用**上一步的 diff**（也就是这条语句之前存的 lastDiff），因为
+		// moveStallStreak 描述的是「上一步走得有没有效果」，要与 PrevKind=Move 对齐。
+		if prevKind == agent.ActionMove && lastDiff < moveStallDiffEps {
+			moveStallStreak++
+		} else {
+			moveStallStreak = 0
+		}
+		lastDiff = diff
+		// 撞墙告警：够步数就点名一次，把「Stop walking into the wall」写进日志
+		// （提示词里也会带 MoveStallStreak，模型看得到）。
+		if moveStallStreak == moveStallStreakWarn {
+			msg := fmt.Sprintf("检测到疑似撞墙：连续 %d 步移动但单步 Δ<%.1f（上一步 Δ%.1f）→ 提示词要求换方向",
+				moveStallStreak, moveStallDiffEps, lastDiff)
+			fmt.Printf("[%s] 🧱 %s\n", progress(step, steps), msg)
+			logHook(msg)
+		}
 		if anchorGray == nil {
 			anchorGray, anchorStep = gray, step
 		} else if step-anchorStep >= stuckWindowSteps {
@@ -550,44 +603,69 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 		}
 		var forced *agent.Action
 		if prevRepeat >= forceLimit {
-			candState := game.StateWorld
-			if inBattle {
-				candState = game.StateBattle
-			}
-			candidates := prof.PressNamesForState(candState)
-			switch {
-			case len(candidates) > 0:
-				// 轮换选一个，且尽量避开正在复读的那个动作（否则等于没换）。
-				pick := candidates[step%len(candidates)]
-				if len(candidates) > 1 {
-					for k := 1; k <= len(candidates); k++ {
-						cand := candidates[(step+k)%len(candidates)]
-						if "press:"+cand != prevAction {
-							pick = cand
-							break
-						}
-					}
-				}
-				forced = &agent.Action{Kind: agent.ActionPress, Name: pick}
-				fmt.Printf("[%s] ⚠️  老师连续 %d 步重复 %s，本步强制换%s项 %s\n",
-					progress(step, steps), prevRepeat, prevAction, candState, forced.String())
-				logHook(fmt.Sprintf("强制换动作 %s（老师复读 %d 步）", forced.String(), prevRepeat))
-			case inBattle:
-				// 战斗态没有可轮换项也没有摇杆：等一个回合，让敌方/动画推进画面。
-				forced = &agent.Action{Kind: agent.ActionNone}
-				msg := fmt.Sprintf("老师连续 %d 步重复 %s、战斗态无可用替换项 → 等待一个回合",
-					prevRepeat, prevAction)
-				fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
-				logHook(msg)
-			default:
-				// 大世界且档案没按钮可换：摇杆长推兜底（换方向本身就是一种脱困）。
+			// ⚠️ 移动复读要**换方向**，不能按按钮。
+			// 2026-09-13 pet_run12：老师 43 步 move:up_right/1500ms，8 步复读兜底
+			// 却去点了 mount/star（世界按钮），既没解开卡点还白送一步。
+			// 移动卡住的唯一出路是换一个方向绕行——这与「策略打转要制造动作多样性」
+			// 是两种病，用药不同。真·瞬移/穿墙之外的场景，换向永远比按按钮有效。
+			if prevKind == agent.ActionMove && prof.CanMove() {
 				d := escapeDirs[escapeIdx%len(escapeDirs)]
+				// 避开正在复读的那个方向（比如当前一直 up_right，就先试 down/left）。
+				for k := 0; k < len(escapeDirs); k++ {
+					if string(d) != moveDirOf(prevAction) {
+						break
+					}
+					escapeIdx++
+					d = escapeDirs[escapeIdx%len(escapeDirs)]
+				}
 				escapeIdx++
 				forced = &agent.Action{Kind: agent.ActionMove, Dir: d, Dur: escapeHoldMs * time.Millisecond}
-				msg := fmt.Sprintf("老师连续 %d 步重复 %s、档案又没按钮可换 → 强制朝 %s 长推 %dms",
+				msg := fmt.Sprintf("老师连续 %d 步重复移动 %s（画面推进不足）→ 强制换方向：朝 %s 长推 %dms",
 					prevRepeat, prevAction, d, escapeHoldMs)
 				fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
 				logHook(msg)
+			} else {
+				candState := game.StateWorld
+				if inBattle {
+					candState = game.StateBattle
+				}
+				candidates := prof.PressNamesForState(candState)
+				switch {
+				case len(candidates) > 0:
+					// 轮换选一个，且尽量避开正在复读的那个动作（否则等于没换）。
+					pick := candidates[step%len(candidates)]
+					if len(candidates) > 1 {
+						for k := 1; k <= len(candidates); k++ {
+							cand := candidates[(step+k)%len(candidates)]
+							if "press:"+cand != prevAction {
+								pick = cand
+								break
+							}
+						}
+					}
+					forced = &agent.Action{Kind: agent.ActionPress, Name: pick}
+					fmt.Printf("[%s] ⚠️  老师连续 %d 步重复 %s，本步强制换%s项 %s\n",
+						progress(step, steps), prevRepeat, prevAction, candState, forced.String())
+					logHook(fmt.Sprintf("强制换动作 %s（老师复读 %d 步）", forced.String(), prevRepeat))
+				case inBattle:
+					// 战斗态没有可轮换项也没有摇杆：等一个回合，让敌方/动画推进画面。
+					forced = &agent.Action{Kind: agent.ActionNone}
+					msg := fmt.Sprintf("老师连续 %d 步重复 %s、战斗态无可用替换项 → 等待一个回合",
+						prevRepeat, prevAction)
+					fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+					logHook(msg)
+				case prof.CanMove():
+					// 大世界且档案没按钮可换：摇杆长推兜底（换方向本身就是一种脱困）。
+					d := escapeDirs[escapeIdx%len(escapeDirs)]
+					escapeIdx++
+					forced = &agent.Action{Kind: agent.ActionMove, Dir: d, Dur: escapeHoldMs * time.Millisecond}
+					msg := fmt.Sprintf("老师连续 %d 步重复 %s、档案又没按钮可换 → 强制朝 %s 长推 %dms",
+						prevRepeat, prevAction, d, escapeHoldMs)
+					fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+					logHook(msg)
+				default:
+					forced = &agent.Action{Kind: agent.ActionNone}
+				}
 			}
 		}
 		if forced != nil {
@@ -669,6 +747,10 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 		}
 		dem.PrevKind = prevKind
 		dem.RepeatCount = prevRepeat
+		// 进度反馈：单帧 VLM 看不出「往前走」和「顶着墙走」的区别，
+		// 把回路测得的画面变化量直接告诉它（pet_run12 43 步死磕同一方向的解法）。
+		dem.LastDiff = lastDiff
+		dem.MoveStallStreak = moveStallStreak
 		act, res, actErr := askTeacher(cfg, dem, jpg)
 
 		info := dataset.StepInfo{Raw: "", LatencyMs: 0, PrevAction: prevAction}

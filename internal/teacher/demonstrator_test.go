@@ -327,6 +327,53 @@ func TestBuildDemoPrompt_移动重复不套禁令(t *testing.T) {
 	}
 }
 
+// 撞墙信号：单帧 VLM 分不清「在往前走」和「顶着墙走」，必须由回路把画面变化量
+// 喂进提示词。pet_run12 连续 43 步 move:up_right/1500ms、单步 Δ 多次掉到 1~3，
+// 老师却无从知道，于是死磕同一方向。
+func TestBuildDemoPrompt_移动停滞要求换方向(t *testing.T) {
+	d := &Demonstrator{
+		PrevAction:      "move:up_right/1500ms",
+		PrevKind:        agent.ActionMove,
+		RepeatCount:     6,
+		LastDiff:        1.8,
+		MoveStallStreak: 4,
+	}
+	p := d.BuildDemoPrompt()
+	if !strings.Contains(p, "禁止再沿原方向走") {
+		t.Errorf("连续停滞的移动应明确要求换方向\n---\n%s", p)
+	}
+	for _, want := range []string{"4", "1.8"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("停滞告警应带上停滞步数与画面变化量，缺 %q\n---\n%s", want, p)
+		}
+	}
+	// 停滞告警与「继续走」指引互斥：同时出现等于自相矛盾，模型会挑软的执行。
+	if strings.Contains(p, "移动本来就会重复很多次") {
+		t.Errorf("停滞告警与「继续走」指引不应同时出现\n---\n%s", p)
+	}
+
+	// 未停滞：仍给「继续走」的指引，但附上 Δ 供参考，且不得禁止方向。
+	d2 := &Demonstrator{
+		PrevAction:  "move:up_right/1500ms",
+		PrevKind:    agent.ActionMove,
+		RepeatCount: 1,
+		LastDiff:    23.4,
+	}
+	p2 := d2.BuildDemoPrompt()
+	if !strings.Contains(p2, "23.4") {
+		t.Errorf("正常移动也该附上画面变化量供参考\n---\n%s", p2)
+	}
+	if strings.Contains(p2, "禁止再沿原方向走") {
+		t.Errorf("没有停滞时不该禁止方向\n---\n%s", p2)
+	}
+
+	// 非移动动作不该出现移动专属文案。
+	d3 := &Demonstrator{PrevAction: "press:jump", PrevKind: agent.ActionPress, RepeatCount: 1, LastDiff: 1.0}
+	if strings.Contains(d3.BuildDemoPrompt(), "画面变化量") {
+		t.Error("按钮动作不该带移动的进度反馈")
+	}
+}
+
 // 最近动作列表与横跳告警：模型只看得见「最近几步」才可能发现自己打转。
 func TestBuildDemoPrompt_最近动作与横跳告警(t *testing.T) {
 	const ur, ul = "move:up_right/500ms", "move:up_left/500ms"

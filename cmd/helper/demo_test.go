@@ -123,3 +123,44 @@ func TestAppendRecent(t *testing.T) {
 		t.Errorf("appendRecent 与入参共享底层数组，改写结果污染了入参 %v", spare)
 	}
 }
+
+// moveDirOf 给复读兜底用：卡住时要换到**另一个**方向，先得从动作串里认出当前方向。
+// 认错方向的后果是「强制换向」换成同一个方向——比不换更糟（白送一步还照撞）。
+func TestMoveDirOf(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"move:up_right/1500ms", "up_right"},
+		{"move:down/500ms", "down"},
+		{"move:left", "left"},
+		{"press:star", ""},
+		{"press:cast_hetu", ""},
+		{"", ""},
+		{"none", ""},
+	}
+	for _, tc := range cases {
+		if got := moveDirOf(tc.in); got != tc.want {
+			t.Errorf("moveDirOf(%q)=%q，期望 %q", tc.in, got, tc.want)
+		}
+	}
+	// 复读兜底要挑的方向必须与当前方向不同，否则等于没换方向（白送一步还照撞）。
+	// 前提一：escapeDirs 里至少要有两个互不相同的方向，换向循环才可能避开当前方向。
+	seen := map[string]bool{}
+	for _, d := range escapeDirs {
+		if seen[string(d)] {
+			t.Errorf("escapeDirs 有重复方向 %q，换向循环可能避不开当前方向", d)
+		}
+		seen[string(d)] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("escapeDirs 只有 %d 个方向，无法换到不同方向", len(seen))
+	}
+	// 前提二：每个 escapeDir 经 moveDirOf 必须能原样认回，否则兜底会把「当前方向」
+	// 认成别的、于是“换向”换到同一个方向。
+	for _, d := range escapeDirs {
+		if got := moveDirOf("move:" + string(d) + "/1500ms"); got != string(d) {
+			t.Errorf("moveDirOf 认不回 escapeDir %q（得到 %q）", d, got)
+		}
+	}
+}

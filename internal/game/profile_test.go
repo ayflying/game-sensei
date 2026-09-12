@@ -179,8 +179,45 @@ func TestNilProfile_安全(t *testing.T) {
 	if p.ButtonNames() != nil {
 		t.Error("nil Profile 的 ButtonNames 应返回 nil")
 	}
+	if p.CanMove() {
+		t.Error("nil Profile 不该声称能移动")
+	}
 	if _, err := p.Resolve(agent.Action{Kind: agent.ActionMove, Dir: agent.DirUp}); err == nil {
 		t.Error("nil Profile 解析 MOVE 应报错，而不是静默执行")
+	}
+}
+
+// CanMove 决定「复读兜底换方向还是换按钮」：判错会让卡死的移动被兜底成乱按按钮，
+// 或者让本来只能点击的游戏被塞进一个 MOVE（然后被 Resolve 报错）。
+func TestCanMove_有摇杆才是能移动(t *testing.T) {
+	cases := []struct {
+		name string
+		mode MoveMode
+		want bool
+	}{
+		{"虚拟摇杆", "joystick", true},
+		{"按键", "keys", true},
+		{"显式无移动", MoveNone, false},
+		{"空串（未配）", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Profile{Move: MoveProfile{Mode: tc.mode}}
+			if got := p.CanMove(); got != tc.want {
+				t.Errorf("mode=%q 时 CanMove()=%v，期望 %v", tc.mode, got, tc.want)
+			}
+		})
+	}
+	// 与协议里的 HasMove 判据同源：两者不一致会让「能给 MOVE」和「能换方向」打架。
+	p, err := Load("nrc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.CanMove() {
+		t.Error("nrc 配了虚拟摇杆，CanMove 应为 true")
+	}
+	if opts := p.ProtocolOptionsForState(StateWorld); !opts.HasMove {
+		t.Error("nrc 大世界态协议应允许 MOVE，与 CanMove 保持一致")
 	}
 }
 
