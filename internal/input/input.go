@@ -51,6 +51,7 @@ const (
 	mouseeventfMove       = 0x0001
 	mouseeventfLeftdown   = 0x0002
 	mouseeventfLeftup     = 0x0004
+	mouseeventfWheel      = 0x0800
 	mouseeventfAbsolute   = 0x8000
 	mouseeventfRightdown  = 0x0008
 	mouseeventfRightup    = 0x0010
@@ -160,7 +161,13 @@ type Actuator struct {
 	// 窗口化游戏里，归一化坐标以窗口客户区为基准（Screen 返回窗口尺寸），
 	// 但 SetCursorPos 要的是屏幕绝对坐标——pixel() 算出域内像素后加上
 	// Offset 才是真正该点的位置。全屏模式 Offset 为零值，行为不变。
+	//
+	// ⚠️ 静态值只适合「窗口不会动」的场景。窗口可被拖动/缩放时用
+	// OffsetFunc（每帧现查）；两者同时设置时 OffsetFunc 优先。
 	Offset image.Point
+	// OffsetFunc 每帧现查域原点偏移。窗口被拖动/缩放后静态 Offset 会错位，
+	// pcBackend 会注入本函数实时读窗口客户区原点。
+	OffsetFunc func() image.Point
 
 	mu sync.Mutex
 	// gen 记录每个键的「按住代次」：只有最新代次的协程才有权抬起按键，
@@ -247,6 +254,23 @@ func (a *Actuator) Apply(act agent.Action) error {
 	case agent.ActionSwipe:
 		return a.swipe(act)
 
+	case agent.ActionZoom:
+		// 缩放 = 滚轮。光标先落在画面中心（滚轮以光标位置为缩放焦点），
+		// in 正向滚、out 反向滚，各滚 3 格（WHEEL_DELTA=120/格）：
+		// 一步的缩放幅度要肉眼可辨，滚 1 格在多数游戏里几乎看不出来。
+		cx, cy, err := a.pixel(0.5, 0.5)
+		if err != nil {
+			return err
+		}
+		if err := moveCursor(cx, cy); err != nil {
+			return err
+		}
+		d := int32(120 * 3) // 放大
+		if act.Dir == agent.DirOut {
+			d = -120 * 3 // SendInput 的 mouseData 用补码表示负值
+		}
+		return send([]winInput{mouseWheel(uint32(d))})
+
 	case agent.ActionMouseMove:
 		return send([]winInput{mouseMove(act.Dx, act.Dy)})
 
@@ -322,7 +346,11 @@ func (a *Actuator) pixel(nx, ny float64) (int, int, error) {
 		y = h - 1
 	}
 	// 域内像素 → 屏幕绝对坐标（窗口模式加窗口偏移；全屏模式偏移为零）
-	return x + a.Offset.X, y + a.Offset.Y, nil
+	off := a.Offset
+	if a.OffsetFunc != nil {
+		off = a.OffsetFunc() // 窗口可拖动/缩放：每帧现查，永不漂移
+	}
+	return x + off.X, y + off.Y, nil
 }
 
 // holdKey 按下键并在 d 之后抬起；期间同键的新请求会延长按住时间。
@@ -423,6 +451,14 @@ func mouseMove(dx, dy int) winInput {
 	var in winInput
 	in.Type = inputMouse
 	in.setMouse(mouseInput{Dx: int32(dx), Dy: int32(dy), Flags: mouseeventfMove})
+	return in
+}
+
+// mouseWheel 构造滚轮事件。delta 单位是 WHEEL_DELTA（120=一格，负值反向）。
+func mouseWheel(delta uint32) winInput {
+	var in winInput
+	in.Type = inputMouse
+	in.setMouse(mouseInput{MouseData: delta, Flags: mouseeventfWheel})
 	return in
 }
 

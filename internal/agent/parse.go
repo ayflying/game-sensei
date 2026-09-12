@@ -55,6 +55,10 @@ var verbKind = []struct {
 	{"swipe", ActionSwipe},
 	{"drag", ActionSwipe},
 	{"滑动", ActionSwipe},
+	{"zoom", ActionZoom},
+	{"缩放", ActionZoom},
+	{"放大", ActionZoom},
+	{"缩小", ActionZoom},
 	{"keypress", ActionKey},
 	{"key", ActionKey},
 	{"按键", ActionKey},
@@ -260,6 +264,43 @@ func parseActionLine(line string) (Action, error) {
 		}
 		return act, nil
 
+	case ActionZoom:
+		// ZOOM in / ZOOM out / ZOOM dir=in。缺省按放大处理（视野信息更有用）。
+		if ds := grabStringArg(rest, "dir", "direction", "d"); ds != "" {
+			switch strings.ToLower(ds) {
+			case "in", "up", "放大":
+				act.Dir = DirIn
+			case "out", "down", "缩小":
+				act.Dir = DirOut
+			default:
+				return Action{}, ErrNoAction
+			}
+			return act, nil
+		}
+		// 裸词：ZOOM in / ZOOM out
+		if w := firstWord(stripKV(rest)); w != "" {
+			switch w {
+			case "in", "up":
+				act.Dir = DirIn
+			case "out", "down":
+				act.Dir = DirOut
+			default:
+				return Action{}, ErrNoAction
+			}
+			return act, nil
+		}
+		// 动词本身带方向（「放大」「缩小」）：按缺省放大
+		if bestWord == "放大" {
+			act.Dir = DirIn
+			return act, nil
+		}
+		if bestWord == "缩小" {
+			act.Dir = DirOut
+			return act, nil
+		}
+		act.Dir = DirIn
+		return act, nil
+
 	case ActionMove:
 		// 优先按「方向移动」（L1 语义动作）解析。
 		if ds := grabStringArg(rest, "dir", "direction", "d"); ds != "" {
@@ -428,6 +469,8 @@ type ProtocolOptions struct {
 	Buttons []string
 	// HasMove 游戏档案里配了移动方式时才列 MOVE。
 	HasMove bool
+	// HasZoom 游戏档案声明支持缩放（PC=滚轮 / 安卓=双指捏合）时才列 ZOOM。
+	HasZoom bool
 	// MoveNote 移动方式的说明，如「虚拟摇杆（位置固定）」。
 	MoveNote string
 }
@@ -472,7 +515,10 @@ func ActionProtocol(o ProtocolOptions) string {
 			strings.Join(o.Buttons, "|"))
 	}
 	b.WriteString("ACTION TAP x=<横坐标> y=<纵坐标>   点击画面某处\n")
-	b.WriteString("ACTION SWIPE x=<> y=<> x2=<> y2=<> dur=<>   滑动（转视角/拖拽）\n")
+	b.WriteString("ACTION SWIPE x=<> y=<> x2=<> y2=<> dur=<>   按住拖拽（平移视角/移动地图视野）\n")
+	if o.HasZoom {
+		b.WriteString("ACTION ZOOM dir=<in|out>   缩放画面（in=放大看细节，out=缩小看全局）\n")
+	}
 	b.WriteString("ACTION HOLD x=<> y=<> dur=<>   长按\n")
 	b.WriteString("ACTION KEY code=<back|home|enter>   发送系统按键\n")
 	b.WriteString("ACTION WAIT   不动，等画面变化\n")
@@ -503,6 +549,11 @@ func ExplainAction(a Action) string {
 	case ActionJoystick:
 		return fmt.Sprintf("摇杆 %.0f%%,%.0f%% 推向 %.0f%%,%.0f%%（%dms）",
 			a.Nx*100, a.Ny*100, a.Nx2*100, a.Ny2*100, a.Dur.Milliseconds())
+	case ActionZoom:
+		if a.Dir == DirIn {
+			return "放大画面"
+		}
+		return "缩小画面"
 	case ActionKey:
 		return "按键 " + a.Code
 	case ActionMouseMove:

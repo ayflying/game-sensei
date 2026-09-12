@@ -104,6 +104,10 @@ type Profile struct {
 	Package string `json:"package,omitempty"`
 	// Orientation 屏幕方向 landscape | portrait，仅作说明与校验提示。
 	Orientation string `json:"orientation,omitempty"`
+	// Zoom 该游戏支持缩放画面（PC=滚轮 / 安卓=双指捏合）。
+	// 只有声明了 true，老师的动作协议里才列 ZOOM——
+	// 缩放在不同游戏里实现差异大（有的根本不能缩），不声明就别让它输出。
+	Zoom bool `json:"zoom,omitempty"`
 
 	Move    MoveProfile `json:"move"`
 	Buttons []Button    `json:"buttons,omitempty"`

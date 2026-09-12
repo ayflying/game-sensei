@@ -45,6 +45,7 @@ const (
 	ActionJoystick                    // L2 虚拟摇杆（Nx,Ny 摇杆中心 -> Nx2,Ny2 推到的目标点，Dur 保持时长）
 	ActionPress                       // L1 按命名按钮（Name 指定，坐标由游戏档案解析）
 	ActionMouseMove                   // L2 鼠标相对移动（Dx/Dy 指定）
+	ActionZoom                        // L1 缩放画面（Dir: in=放大 / out=缩小）。PC=滚轮，安卓=双指捏合
 )
 
 // Action 是一次决策输出。字段按需取用。
@@ -109,6 +110,11 @@ func (a Action) String() string {
 	case ActionJoystick:
 		return fmt.Sprintf("joy:%.3f,%.3f->%.3f,%.3f/%dms",
 			a.Nx, a.Ny, a.Nx2, a.Ny2, a.Dur.Milliseconds())
+	case ActionZoom:
+		if a.Dir == DirIn {
+			return "zoom:in"
+		}
+		return "zoom:out"
 	default:
 		return "none"
 	}

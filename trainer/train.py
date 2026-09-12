@@ -99,8 +99,14 @@ def map_action(s: dict) -> tuple[str | None, float, float]:
                 return d, 0.0, 0.0
         return None, 0.0, 0.0
     if kind == "swipe":
-        # 点击类游戏里滑动多是想点某处或转视角，先按 tap 起点处理
-        return "tap", float(s.get("nx", 0.5)), float(s.get("ny", 0.5))
+        # 学生头暂无 swipe 类：拖拽平移示范降级成 wait，不模仿成「点起点」
+        # （那是错误行为——拖拽要按住移动，点一下起点什么都不会发生）。
+        # 后续扩学生动作头时（swipe 方向类）再收回。
+        return "wait", 0.0, 0.0
+    if kind == "zoom":
+        # 学生头暂无 zoom 类：缩放示范降级成 wait（不模仿成乱点）。
+        # 后续扩学生动作头时（zoom in/out 独立类）再收回。
+        return "wait", 0.0, 0.0
     if kind == "wait":
         return "wait", 0.0, 0.0
     if kind == "none":

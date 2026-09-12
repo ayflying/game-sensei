@@ -258,12 +258,14 @@ func main() {
 			// 全屏感知在窗口化游戏上是双重劣化——老师的送审帧里游戏只占
 			// 一小块、学生的降采样观测里游戏只剩噪声；点击也要叠加窗口偏移。
 			// 找到窗口就把三者统一到窗口坐标系（失败不致命，退回全屏模式）。
+			// ⚠️ 矩形不是静态的：窗口可被拖动/缩放，newPCBackend 已按
+			// 关键词每帧现查，这里只做启动时的一次性确认与日志。
 			if pcb, ok := be.(*pcBackend); ok {
 				if cr, found := gamewin.ClientRectByTitle(kw); found {
-					pcb.SetWindowRegion(cr)
-					fmt.Printf("感知域: 窗口客户区 %dx%d@(%d,%d)（仅截取游戏画面，点击按窗口坐标换算）\n",
+					pcb.SetWindowRegion(cr, kw)
+					fmt.Printf("感知域: 窗口客户区 %dx%d@(%d,%d)（动态跟踪，拖动/缩放窗口不失效）\n",
 						cr.Dx(), cr.Dy(), cr.Min.X, cr.Min.Y)
-					logHook(fmt.Sprintf("窗口域 %dx%d@(%d,%d)", cr.Dx(), cr.Dy(), cr.Min.X, cr.Min.Y))
+					logHook(fmt.Sprintf("窗口域 %dx%d@(%d,%d) 动态", cr.Dx(), cr.Dy(), cr.Min.X, cr.Min.Y))
 				} else {
 					fmt.Println("⚠️  未能定位游戏窗口客户区，退回全屏感知模式")
 				}

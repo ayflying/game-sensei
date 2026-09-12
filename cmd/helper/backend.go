@@ -10,6 +10,7 @@ import (
 	"github.com/ayflying/game-sensei/internal/capture"
 	"github.com/ayflying/game-sensei/internal/config"
 	"github.com/ayflying/game-sensei/internal/game"
+	"github.com/ayflying/game-sensei/internal/gamewin"
 	"github.com/ayflying/game-sensei/internal/input"
 )
 
@@ -63,19 +64,37 @@ func (r actionResolver) Resolve(act agent.Action) (agent.Action, error) {
 
 func (r actionResolver) Profile() *game.Profile { return r.profile }
 
-func newPCBackend(prof *game.Profile, live bool) *pcBackend {
+// newPCBackend 构造 PC 后端。winKeyword 非空 = 窗口域模式：
+// 感知与点击都以该标题窗口的客户区为基准，且每帧现查（窗口可拖动/缩放）。
+func newPCBackend(prof *game.Profile, live bool, winKeyword string) *pcBackend {
+	kw := winKeyword
 	act := input.NewActuator(live)
 	// 注入点击域尺寸：点击类动作要把归一化坐标换算成鼠标绝对位置。
 	// 全屏模式下是桌面尺寸；SetWindowRegion 后会换成窗口尺寸（见该函数）。
 	// 不注入的话点击会明确报错，而不是点到 (0,0) 去。
+	// 窗口域模式下点击换算基准动态查窗口客户区（窗口被拖动/缩放也不漂移）：
+	// 尺寸 = 客户区宽高，偏移 = 客户区原点。winKeyword 为空时退回桌面尺寸。
 	act.Screen = func() (int, int, error) {
+		if kw != "" {
+			if cr, found := gamewin.ClientRectByTitle(kw); found {
+				return cr.Dx(), cr.Dy(), nil
+			}
+		}
 		r, err := capture.Bounds()
 		if err != nil {
 			return 0, 0, err
 		}
 		return r.Dx(), r.Dy(), nil
 	}
-	return &pcBackend{actionResolver: actionResolver{profile: prof}, actuator: act}
+	act.OffsetFunc = func() image.Point {
+		if kw != "" {
+			if cr, found := gamewin.ClientRectByTitle(kw); found {
+				return cr.Min
+			}
+		}
+		return image.Point{}
+	}
+	return &pcBackend{actionResolver: actionResolver{profile: prof}, actuator: act, winKeyword: kw}
 }
 
 // SetWindowRegion 把 PC 后端的「感知 + 点击」域收敛到窗口矩形内。
@@ -86,28 +105,56 @@ func newPCBackend(prof *game.Profile, live bool) *pcBackend {
 // 全屏感知下老师的送审帧里游戏只占 28%、学生的 160px 观测里只剩 45px 噪声；
 // 点击坐标若按全屏换算，档案里的归一化值还要叠加窗口偏移。收敛到窗口后
 // 三者共享同一坐标系：截的是窗口、看的只有游戏、归一化坐标直接乘窗口宽高。
-func (b *pcBackend) SetWindowRegion(r image.Rectangle) {
+//
+// ⚠️ 缓存陷阱：窗口可被用户**拖动/缩放**，启动时缓存的矩形会失效——
+// 轻则截到桌面背景，重则点击全部错位。所以这里只记关键词，矩形每帧现查
+// （currentRegion）。首次参数 r 仅用于启动时的一次性校验/日志。
+func (b *pcBackend) SetWindowRegion(r image.Rectangle, titleKeyword string) {
+	b.winKeyword = titleKeyword
 	b.region = r
-	if r.Empty() {
-		b.actuator.Offset = image.Point{}
-		return
-	}
-	b.actuator.Offset = r.Min
-	// 点击域尺寸换成窗口客户区尺寸，归一化坐标的换算基准与感知域一致。
-	b.actuator.Screen = func() (int, int, error) {
-		return r.Dx(), r.Dy(), nil
-	}
+	// 点击域尺寸/偏移也走动态查询：与感知域同源，永不漂移。
+	b.actuator.Offset = image.Point{} // 偏移在 pixel() 现查（见 Screen 注入）
+	b.actuator.Screen = b.windowSize
 }
 
-// windowRegion 返回当前生效的裁剪矩形（空 = 全屏）。
-func (b *pcBackend) windowRegion() image.Rectangle { return b.region }
+// currentRegion 实时查询窗口客户区。
+//
+// 找不到窗口（用户关了游戏）时回退到上次缓存——此时抓屏/点击很快会失败，
+// 但坐标系不至于跳变，日志里能看到「窗口丢了」的提示而不是静默错位。
+func (b *pcBackend) currentRegion() image.Rectangle {
+	if b.winKeyword == "" {
+		return image.Rectangle{} // 全屏模式
+	}
+	if cr, found := gamewin.ClientRectByTitle(b.winKeyword); found {
+		b.region = cr // 顺手刷新缓存，供窗口丢失时兜底
+		return cr
+	}
+	fmt.Println("⚠️  游戏窗口找不到了（可能被关闭/最小化），沿用上次窗口位置")
+	return b.region
+}
+
+// windowSize 是点击换算的动态基准：窗口模式返回当前客户区尺寸，否则桌面。
+func (b *pcBackend) windowSize() (int, int, error) {
+	r := b.currentRegion()
+	if !r.Empty() {
+		return r.Dx(), r.Dy(), nil
+	}
+	scr, err := capture.Bounds()
+	if err != nil {
+		return 0, 0, err
+	}
+	return scr.Dx(), scr.Dy(), nil
+}
 
 // pcBackend 控制本机：GDI 抓屏 + SendInput 键鼠。
 type pcBackend struct {
 	actionResolver
 	actuator *input.Actuator
-	// region 非空时：感知与点击都限制在窗口矩形内（屏幕坐标系）。
+	// region 窗口域矩形（屏幕坐标系）；空 = 全屏模式。
+	// ⚠️ 别直接读它——窗口可被拖动/缩放，实时值走 currentRegion()。
 	region image.Rectangle
+	// winKeyword 窗口标题关键词；非空 = 窗口域模式，矩形每帧现查。
+	winKeyword string
 	// beforeShot/afterShot 在每次抓屏前后调用（抓屏时隐藏日志浮窗，
 	// 避免 WDA 在 GDI 截屏里留下黑块污染老师/学生的感知）。可为 nil。
 	beforeShot func()
@@ -126,8 +173,8 @@ func (b *pcBackend) Grab(downWidth int) (*image.Gray, error) {
 	if restore != nil {
 		defer restore()
 	}
-	if !b.region.Empty() {
-		return capture.GrabRegion(b.region, downWidth)
+	if r := b.currentRegion(); !r.Empty() {
+		return capture.GrabRegion(r, downWidth)
 	}
 	return capture.Grab(downWidth)
 }
@@ -137,8 +184,8 @@ func (b *pcBackend) GrabColor() (image.Image, error) {
 	if restore != nil {
 		defer restore()
 	}
-	if !b.region.Empty() {
-		return capture.GrabColorRegion(b.region)
+	if r := b.currentRegion(); !r.Empty() {
+		return capture.GrabColorRegion(r)
 	}
 	return capture.GrabColor()
 }
@@ -154,14 +201,7 @@ func (b *pcBackend) Apply(act agent.Action) error {
 // Size 返回「感知域」尺寸：窗口模式返回窗口客户区尺寸，否则返回桌面尺寸。
 // 归一化坐标的换算基准必须与它一致——截到的是什么域，点击就换算到什么域。
 func (b *pcBackend) Size() (int, int, error) {
-	if !b.region.Empty() {
-		return b.region.Dx(), b.region.Dy(), nil
-	}
-	r, err := capture.Bounds()
-	if err != nil {
-		return 0, 0, err
-	}
-	return r.Dx(), r.Dy(), nil
+	return b.windowSize()
 }
 
 func (b *pcBackend) Describe() string { return "pc（本机 GDI 截屏 + SendInput 键鼠）" }
@@ -229,7 +269,7 @@ func (b *adbBackend) Close() error { return nil }
 func openBackend(cfg config.Config, prof *game.Profile, launch bool) (backend, error) {
 	switch cfg.Target {
 	case "pc", "":
-		return newPCBackend(prof, cfg.Live), nil
+		return newPCBackend(prof, cfg.Live, gameKeyword(cfg, prof)), nil
 
 	case "android":
 		dev, err := android.Open(cfg.ADBPath, cfg.Serial)

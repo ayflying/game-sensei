@@ -203,6 +203,7 @@ func (p *Profile) ProtocolOptions() agent.ProtocolOptions {
 		Buttons:  p.buttonList(),
 		HasMove:  p.Move.Mode != MoveNone && p.Move.Mode != "",
 		MoveNote: p.Move.moveNote(),
+		HasZoom:  p.Zoom,
 	}
 }
 

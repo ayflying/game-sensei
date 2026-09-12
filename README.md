@@ -849,3 +849,31 @@ trajectory.jsonl + frames/  →  trainer/train.py  →  models/*.weights.json  �
 - Go vs torch parity 最大误差 1e-6；
 - 实测行为：120 帧全部 `tap:(0.58,0.50)`（点田）——数据分布单一致
   行为单一，属预期；后续靠多轮异状态示范（站着田边/弹着菜单各采一段）改善。
+
+### 11.10 动作空间补全：SWIPE 拖拽 + ZOOM 缩放（2026-09-12 下午）
+
+用户实测指出：解忧梦幻岛画面**可以按住拖拽平移、滚轮缩放**，此前动作空间
+没覆盖这两个操作。补全（裸 syscall 探针实测：拖拽平移视角 ✅、滚轮缩放 ✅）：
+
+- **SWIPE（已有，启用语义修正）**：L1 `ACTION SWIPE x y x2 y2 dur`，
+  PC 端 `input.Actuator.swipe` 按住拖拽分 12 步移动。协议描述从「转视角」
+  改为「按住拖拽（平移视角/移动地图视野）」。
+- **ZOOM（新增 L1 动作）**：`ACTION ZOOM dir=<in|out>`；PC 端翻译成滚轮
+  （光标置画面中心，±3 格 WHEEL_DELTA），安卓端双指捏合 TODO。
+  解析兼容 `zoom out` / `放大` / `缩小` 等写法。
+- **档案开关**：`"zoom": true` 才在老师协议里列 ZOOM——缩放实现因游戏而异
+  （有的根本不能缩），不声明就不让模型输出。
+- **学生侧**：8 类动作头暂未扩（swipe/zoom 示范样本降级为 wait，
+  见 trainer/train.py map_action），避免改类别数作废旧权重；等拖拽/缩放
+  示范积累到一定量再扩 10 类。
+
+### 11.11 窗口域动态跟踪（2026-09-12 下午）
+
+窗口可被用户拖动/缩放，启动时缓存的客户区矩形会失效——轻则截到桌面
+背景，重则点击全部错位。改为**每帧现查**：
+
+- `pcBackend.SetWindowRegion(rect, keyword)` 只记关键词，矩形走
+  `currentRegion()` 实时查（`gamewin.ClientRectByTitle`）；
+- `input.Actuator` 新增 `OffsetFunc`（每帧现查窗口原点），静态 `Offset`
+  仍保留（二者同时设置时 OffsetFunc 优先）；
+- 实测：窗口 (754,125)→(854,225) 拖动后，感知域自动变为 411x798@(862,225)。
