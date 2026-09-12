@@ -4,6 +4,7 @@ import (
 	"image"
 	"testing"
 
+	"github.com/ayflying/game-sensei/internal/agent"
 	"github.com/ayflying/game-sensei/internal/game"
 )
 
@@ -162,5 +163,39 @@ func TestMoveDirOf(t *testing.T) {
 		if got := moveDirOf("move:" + string(d) + "/1500ms"); got != string(d) {
 			t.Errorf("moveDirOf 认不回 escapeDir %q（得到 %q）", d, got)
 		}
+	}
+}
+
+// moveStallStep 是「顶着墙走」的唯一量化信号，错一格就会让整轮采集静默空耗
+// （pet_run12 连打 43 步 move:up_right 而无人察觉）。逐条钉死：
+// 只有「上一步是移动 + 本步 Δ 小 + 方向没变」才累加。
+func TestMoveStallStep(t *testing.T) {
+	const small, big = 1.0, 9.9
+	cases := []struct {
+		name     string
+		prevKind agent.ActionKind
+		diff     float64
+		prevDir  string
+		streak   int
+		dir      string
+		wantN    int
+		wantDir  string
+	}{
+		{"非移动动作清零", agent.ActionPress, small, "up_right", 3, "up_right", 0, ""},
+		{"Δ 偏大不算停滞", agent.ActionMove, big, "up_right", 2, "up_right", 0, ""},
+		{"方向未知（无法判定）清零", agent.ActionMove, small, "", 2, "", 0, ""},
+		{"首次同向小 Δ 起算", agent.ActionMove, small, "up_right", 0, "", 1, "up_right"},
+		{"同向再走一步累加", agent.ActionMove, small, "up_right", 1, "up_right", 2, "up_right"},
+		{"换方向后重新计数", agent.ActionMove, small, "down", 3, "up_right", 1, "down"},
+		{"Δ 恰等于阈值不算停滞", agent.ActionMove, moveStallDiffEps, "up_right", 5, "up_right", 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n, d := moveStallStep(tc.prevKind, tc.diff, tc.prevDir, tc.streak, tc.dir)
+			if n != tc.wantN || d != tc.wantDir {
+				t.Errorf("moveStallStep(%v, %.1f, %q, %d, %q) = (%d, %q)，期望 (%d, %q)",
+					tc.prevKind, tc.diff, tc.prevDir, tc.streak, tc.dir, n, d, tc.wantN, tc.wantDir)
+			}
+		})
 	}
 }

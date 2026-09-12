@@ -272,6 +272,22 @@ func moveDirOf(action string) string {
 	return rest
 }
 
+// moveStallStep 推进「移动停滞」计数，返回 (新的连续步数, 新的方向)。
+//
+// 抽成纯函数是为了单测能钉死语义——这段判据出错的代价很高：错一格就会让
+// 「顶着墙走」在日志里静默（pet_run12 43 步死磕同一方向而无人察觉）。
+// 三条同时成立才累加：上一步是移动、本步画面变化量小、且方向与上次相同；
+// 换方向视为「重新开始」，非移动动作直接清零。
+func moveStallStep(prevKind agent.ActionKind, diff float64, prevDir string, streak int, dir string) (int, string) {
+	if prevKind != agent.ActionMove || prevDir == "" || diff >= moveStallDiffEps {
+		return 0, ""
+	}
+	if prevDir == dir {
+		return streak + 1, dir
+	}
+	return 1, prevDir // 首次出现，或老师换向后重新计数
+}
+
 // runDemo 是「老师在线示范」回路（Phase 2 的第一块）。
 //
 // 与 Phase 1 的 teachLoop 有本质区别：
@@ -351,9 +367,9 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 	// 2026-09-13 pet_run12：老师 43 步 move:up_right/1500ms，单步 Δ 多次 1~3，
 	// 而窗口Δ只在 step21/56 两次跌破 6.0。把这个信号喂给老师才是解法。
 	var moveStallStreak int
-	// lastDiff 是上一步执行后的单步画面变化量（与日志里的 Δ 同源）。
-	// 既用于 moveStallStreak 判据，也喂给老师（Demonstrator.LastDiff）。
-	var lastDiff float64
+	// moveStallDir 是上一个「小 Δ 移动」的方向。换方向即清零 streak——
+	// 否则老师刚换了向、Δ 仍小，提示词会继续说「禁止再沿原方向走」，与它刚做的事矛盾。
+	var moveStallDir string
 	var escapeIdx int         // 摇杆兜底脱困的方向轮换游标
 	var escapeAttempt int     // 脱困次数：奇数轮跑档案脚本、偶数轮摇杆长推
 	var inBattle bool         // 当前帧是否处于回合战斗态（底部 5 圆钮判据）
@@ -430,20 +446,16 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 		// 两个口径的定标依据见文件头 stuckWindowSteps 的注释。
 		diff := frameDiff(prevGray, gray)
 		prevGray = gray
-		// moveStallStreak：只在「上一步是移动」且「上一步后画面几乎没变」时累加。
-		// 判据用**上一步的 diff**（也就是这条语句之前存的 lastDiff），因为
-		// moveStallStreak 描述的是「上一步走得有没有效果」，要与 PrevKind=Move 对齐。
-		if prevKind == agent.ActionMove && lastDiff < moveStallDiffEps {
-			moveStallStreak++
-		} else {
-			moveStallStreak = 0
-		}
-		lastDiff = diff
+		// moveStallStreak：只在「上一步是移动」「这一步的画面变化量很小」「方向没变」
+		// 三条同时成立时累加。判据必须用**本步算出的 diff**——diff = frameDiff(gray_{k-1}, gray_k)
+		// 正是「上一步动作造成的画面变化量」，与 PrevKind（上一步动作种类）严格对齐。
+		// ⚠️ 别用上一轮存的 Δ：那描述的是上上一步，会和 PrevKind 错开一格（实测过）。
+		moveStallStreak, moveStallDir = moveStallStep(prevKind, diff, moveDirOf(prevAction), moveStallStreak, moveStallDir)
 		// 撞墙告警：够步数就点名一次，把「Stop walking into the wall」写进日志
 		// （提示词里也会带 MoveStallStreak，模型看得到）。
 		if moveStallStreak == moveStallStreakWarn {
-			msg := fmt.Sprintf("检测到疑似撞墙：连续 %d 步移动但单步 Δ<%.1f（上一步 Δ%.1f）→ 提示词要求换方向",
-				moveStallStreak, moveStallDiffEps, lastDiff)
+			msg := fmt.Sprintf("检测到疑似撞墙：连续 %d 步朝 %s 移动但单步 Δ<%.1f（本步 Δ%.1f）→ 提示词要求换方向",
+				moveStallStreak, moveStallDir, moveStallDiffEps, diff)
 			fmt.Printf("[%s] 🧱 %s\n", progress(step, steps), msg)
 			logHook(msg)
 		}
@@ -609,21 +621,28 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 			// 移动卡住的唯一出路是换一个方向绕行——这与「策略打转要制造动作多样性」
 			// 是两种病，用药不同。真·瞬移/穿墙之外的场景，换向永远比按按钮有效。
 			if prevKind == agent.ActionMove && prof.CanMove() {
-				d := escapeDirs[escapeIdx%len(escapeDirs)]
-				// 避开正在复读的那个方向（比如当前一直 up_right，就先试 down/left）。
-				for k := 0; k < len(escapeDirs); k++ {
-					if string(d) != moveDirOf(prevAction) {
-						break
+				// ⚠️ 还要看**是不是真没挪窝**：反复同向但画面一直在推进（Δ 不小），
+				// 那只是正常赶路，强行拐弯会把一次直行拆成一路乱拐。
+				// 2026-09-13 pet_run13：老师连走 17 步 up_right 且 Δ 稳在 13~33，
+				// 仍是正常推进，不该被复读计数打断。只在这条 Δ 判据下才换向。
+				if diff < moveStallDiffEps {
+					d := escapeDirs[escapeIdx%len(escapeDirs)]
+					// 避开正在复读的那个方向（比如当前一直 up_right，就先试 down/left）。
+					for k := 0; k < len(escapeDirs); k++ {
+						if string(d) != moveDirOf(prevAction) {
+							break
+						}
+						escapeIdx++
+						d = escapeDirs[escapeIdx%len(escapeDirs)]
 					}
 					escapeIdx++
-					d = escapeDirs[escapeIdx%len(escapeDirs)]
+					forced = &agent.Action{Kind: agent.ActionMove, Dir: d, Dur: escapeHoldMs * time.Millisecond}
+					msg := fmt.Sprintf("老师连续 %d 步重复移动 %s 且画面未推进（Δ%.1f<%.1f）→ 强制换方向：朝 %s 长推 %dms",
+						prevRepeat, prevAction, diff, moveStallDiffEps, d, escapeHoldMs)
+					fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+					logHook(msg)
 				}
-				escapeIdx++
-				forced = &agent.Action{Kind: agent.ActionMove, Dir: d, Dur: escapeHoldMs * time.Millisecond}
-				msg := fmt.Sprintf("老师连续 %d 步重复移动 %s（画面推进不足）→ 强制换方向：朝 %s 长推 %dms",
-					prevRepeat, prevAction, d, escapeHoldMs)
-				fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
-				logHook(msg)
+				// Δ 不小：交回老师继续（提示词已带 Δ 与移动停滞计数），此处不打断。
 			} else {
 				candState := game.StateWorld
 				if inBattle {
@@ -749,7 +768,8 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 		dem.RepeatCount = prevRepeat
 		// 进度反馈：单帧 VLM 看不出「往前走」和「顶着墙走」的区别，
 		// 把回路测得的画面变化量直接告诉它（pet_run12 43 步死磕同一方向的解法）。
-		dem.LastDiff = lastDiff
+		// 用本步的 diff：它正是「上一步动作造成的画面变化量」，与 PrevAction 对齐。
+		dem.LastDiff = diff
 		dem.MoveStallStreak = moveStallStreak
 		act, res, actErr := askTeacher(cfg, dem, jpg)
 
