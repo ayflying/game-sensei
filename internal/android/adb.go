@@ -66,6 +66,18 @@ func FindADB() (string, error) {
 		}
 	}
 
+	// 1.5) Windows 上 WinGet 安装的 platform-tools。
+	//
+	// 实测踩坑（2026-09-13）：PATH 里往往有一个随 IDE / 工具链附带的旧 adb
+	// （1.0.40 / 28.0.2），而设备侧或新装的 server 是 1.0.41 / 37.0.1。旧客户端
+	// 连不上新 server，会打印「adb server version (41) doesn't match this
+	// client (40); killing... / cannot connect to daemon」，后续 devices 直接为空，
+	// 上层只看到「没有在线设备」，极难定位。WinGet 装的 Google.PlatformTools_*
+	// 是最新版，故让它优先于 PATH 命中。
+	if p, ok := findWinGetADB(name); ok {
+		return p, nil
+	}
+
 	// 2) PATH（含 PATHEXT 解析）
 	if p, err := exec.LookPath("adb"); err == nil {
 		return p, nil
@@ -246,6 +258,34 @@ func (d *Device) execOut(args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("android: exec-out 无输出: %v", args)
 	}
 	return stdout.Bytes(), nil
+}
+
+// findWinGetADB 在 %LOCALAPPDATA%\Microsoft\WinGet\Packages\Google.PlatformTools_*\
+// platform-tools\ 下查找 adb。WinGet 的包目录名带随机后缀，故按前缀匹配。
+func findWinGetADB(name string) (string, bool) {
+	local := os.Getenv("LOCALAPPDATA")
+	if local == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		local = filepath.Join(home, "AppData", "Local")
+	}
+	base := filepath.Join(local, "Microsoft", "WinGet", "Packages")
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return "", false
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(strings.ToLower(e.Name()), "google.platformtools") {
+			continue
+		}
+		p := filepath.Join(base, e.Name(), "platform-tools", name)
+		if fileExists(p) {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 func resolveADB(p string) (string, error) {
