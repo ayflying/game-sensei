@@ -5,7 +5,7 @@
 
 ---
 
-## 0. 三条最重要的红线
+## 0. 四条最重要的红线
 
 ### 0.1 知识归档分界（最常搞错，务必分清）
 
@@ -33,6 +33,23 @@
 ### 0.3 区分「已实现 / 已单测 / 已本地验证 / 已真机验证 / 已发布」
 
 **不以代码存在代替功能完成**。结论必须来自真实实测输出；调试服、测试环境、正式环境必须分清。
+
+### 0.4 读截图必须用小图，否则对话会被 `400` 打断
+
+**症状**：回合进行到一半突然中断，末尾出现
+`400 Unable to read request body (<requestId>)`，之前的输出被截断。
+
+**根因**：不是游戏/接口报错，是**对话请求体被图片撑爆**。真机截图 900×1600 PNG 约 1.2MB/张，
+进模型要 base64 编码再膨胀 1.34 倍 ≈ **1.67MB/张**；一个回合读 4~5 张就是 **8MB+**，服务端直接 400。
+
+**铁律**：
+- 读图**只读压缩版 `*.s.jpg`**（720×1280 JPEG q80 ≈ **120KB**，约原图 1/11，UI 文字仍清晰），
+  **永远不要直接 Read 原始 `*.png`**。
+- 长任务里**别把一批图堆在同一个回合读**——判断尽量下沉到脚本（脚本内读图/统计/OCR），
+  只在关键节点读 **1~2 张**小图确认。
+- 遇到 400 **不要原样重发同一批图**（必然再炸）；先削减图片**数量与体积**再重试。
+
+工具支持见 §6 的 `sp.py`（`shot` 自动出 `.s.jpg`、`pack` 批量压缩、`newest` 给可读路径）。
 
 ---
 
@@ -98,6 +115,7 @@
 - **窗口域是动态跟踪**：`SetWindowRegion(rect, keyword)` 每帧现查客户区，`Actuator.OffsetFunc` 每帧现查偏移——窗口拖动/缩放不失效。别改回静态缓存。
 - **退出必须调 `ReleaseAll()`**，否则键盘卡在按下状态。
 - **MuMu 模拟器**：自带 adb 版本旧，用 Android SDK 版 `adb.exe`；模拟器内 adb 端口 `127.0.0.1:16384`。详见用户级技能 `mumu-emulator-control`。
+- **对话 `400 Unable to read request body`**：是**请求体被截图撑爆**，不是游戏/接口问题。读图只读压缩版 `.s.jpg`，详见 §0.4。
 
 ---
 
@@ -127,3 +145,6 @@ git status
 - 标定工具 `tools/`：`grid_overlay.py`（坐标读数）、`detect_state` / `runstats` / `watch` / `movetest`（洛王国真机跑批）。
 - CodeGraph：`C:/Users/ay/AppData/Local/codegraph/current/bin/codegraph.cmd`，重建索引 `codegraph init -i`；`.codegraph/` 已 gitignore。
 - 老师模型本地 Ollama 项目实例：端口 **11435**，模型库 `.ollama/models`，启动 `tools/serve_ollama.sh`。
+- 探索辅助脚本（临时工具，`.workbuddy/` 已 gitignore）：`.workbuddy/sparkle/sp.py` ——
+  `shot <名>`（截图**并自动压出 `.s.jpg`**）/ `tap` / `tapraw` / `swipe` / `front` / `pack [目录]`（批量压缩历史截图）/ `newest`（输出最新一张的可读路径）/ `do "序列"`。
+  **读图只读 `.s.jpg`，不要读原始 `.png`**（见 §0.4）。
