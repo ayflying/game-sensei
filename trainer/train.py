@@ -16,12 +16,24 @@ internal/student 纯 Go 前向传播加载——零 CGO、零外部依赖。
 用法：
   C:/Users/ay/.workbuddy/binaries/python/envs/default/Scripts/python.exe \
       trainer/train.py --data .workbuddy/demos/jieyou_01 --out models/jieyou_v1.weights.json
+
+增量训练（后续真机示范到了，在已有模型上继续训）：
+  C:/Users/ay/.workbuddy/binaries/python/envs/default/Scripts/python.exe \
+      trainer/train.py --data .workbuddy/demos/nrc_real_01 \
+      --init models/video_v1.weights.json --freeze-backbone \
+      --epochs 30 --lr 3e-4 --out models/video_v1_real_v1.weights.json
+
+  --init 从已有 .weights.json 热启动（载入全部权重再继续训），
+  --freeze-backbone 额外冻结三层卷积、只训分类/坐标头——
+  真机样本往往只有几十条，全量微调会把预训练视觉特征冲掉（灾难性遗忘），
+  冻结骨干只让「决策头」适配新数据更稳。产出的 meta 会记录 parent 形成血缘链。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -208,6 +220,65 @@ def export_weights(model, hidden: int, out_path: Path, meta: dict):
 
 
 # ---------------------------------------------------------------------------
+# 权重导入（增量训练 --init 用）
+# ---------------------------------------------------------------------------
+
+def import_weights_json(path: Path, hidden: int) -> tuple[dict, dict]:
+    """读 .weights.json 还原成 torch state_dict，供 --init 热启动。
+
+    返回 (state_dict, meta)。格式/版本/hidden/类别/字段长度任一不一致都直接报错退出——
+    **静默用随机权重继续训**是最坏的结果：看着像「在已有模型上加训」，
+    实际是重训，而且不会有人发现。
+    """
+    import torch
+
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    if doc.get("format") != "game-sensei-student-weights":
+        sys.exit(f"--init 不是学生权重文件: {path}")
+    if doc.get("version") != 1:
+        sys.exit(f"--init 权重版本不支持: {doc.get('version')}")
+
+    arch = doc.get("arch") or {}
+    src_hidden = int(arch.get("hidden") or 0)
+    if src_hidden != hidden:
+        sys.exit(f"--init 权重 hidden={src_hidden} 与本次 --hidden={hidden} 不一致")
+    if arch.get("classes") and list(arch["classes"]) != CLS:
+        sys.exit("--init 权重的类别顺序与当前 CLS 不一致，拒绝加载")
+
+    # JSON 键名 -> (state_dict 键名, 形状)，与 export_weights 的导出顺序一一对应
+    shapes = {
+        "conv1_w": ("conv1.weight", (8, 1, 3, 3)), "conv1_b": ("conv1.bias", (8,)),
+        "conv2_w": ("conv2.weight", (16, 8, 3, 3)), "conv2_b": ("conv2.bias", (16,)),
+        "conv3_w": ("conv3.weight", (24, 16, 3, 3)), "conv3_b": ("conv3.bias", (24,)),
+        "fc_w": ("fc.weight", (hidden, 24)), "fc_b": ("fc.bias", (hidden,)),
+        "cls_w": ("cls_head.weight", (len(CLS), hidden)), "cls_b": ("cls_head.bias", (len(CLS),)),
+        "coord_w": ("coord_head.weight", (2, hidden)), "coord_b": ("coord_head.bias", (2,)),
+    }
+    w = doc.get("weights") or {}
+    sd = {}
+    for jkey, (skey, shape) in shapes.items():
+        v = w.get(jkey)
+        n = 1
+        for d in shape:
+            n *= d
+        if v is None or len(v) != n:
+            got = "缺失" if v is None else len(v)
+            sys.exit(f"--init 权重字段 {jkey} 长度 {got} != 期望 {n}")
+        sd[skey] = torch.tensor(v, dtype=torch.float32).reshape(shape)
+    return sd, (doc.get("meta") or {})
+
+
+def git_short_commit() -> str:
+    """当前 HEAD 短哈希（模型留档用）；不在 git 仓库时返回 unknown。"""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+# ---------------------------------------------------------------------------
 # 训练主流程
 # ---------------------------------------------------------------------------
 
@@ -224,6 +295,10 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--init", default="", help="从已有 .weights.json 热启动（增量训练）")
+    ap.add_argument("--freeze-backbone", action="store_true",
+                    help="冻结三层卷积、只训决策头（真机小样本加训防灾难性遗忘）")
+    ap.add_argument("--note", default="", help="写入 meta.note 的标注（如标签质量说明）")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -246,7 +321,21 @@ def main() -> None:
     cls_w = torch.tensor(CLASS_WEIGHTS)
 
     model = build_model(args.hidden)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    parent_meta: dict = {}
+    if args.init:
+        sd, parent_meta = import_weights_json(Path(args.init), args.hidden)
+        model.load_state_dict(sd)
+        print(f"热启动: 已从 {args.init} 载入权重 "
+              f"(parent val_acc={parent_meta.get('val_acc')}, samples={parent_meta.get('samples')})")
+    if args.freeze_backbone:
+        if not args.init:
+            print("提示: --freeze-backbone 在无 --init 时无实际意义（随机骨干本就没有可保留的特征）")
+        for m in (model.conv1, model.conv2, model.conv3):
+            for prm in m.parameters():
+                prm.requires_grad = False
+        print("已冻结三层卷积，本轮只训 fc / cls_head / coord_head")
+    # 只把需要梯度的参数交给优化器（冻结骨干时不更新卷积）
+    opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     cls_loss_fn = nn.CrossEntropyLoss(weight=cls_w)
     coord_loss_fn = nn.SmoothL1Loss(reduction="none")
 
@@ -299,7 +388,22 @@ def main() -> None:
         "down_w": 64,
         "down_h": 48,
         "trained_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        # 训练配置与代码版本（DEVELOPMENT_PLAN §7：模型必须可追溯到数据集/配置/提交）
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "batch": args.batch,
+        "seed": args.seed,
+        "hidden": args.hidden,
+        "backbone_frozen": bool(args.freeze_backbone),
+        "git_commit": git_short_commit(),
     }
+    if args.init:
+        # 血缘：本模型由哪个模型加训而来（增量训练可追溯）
+        meta["parent"] = str(Path(args.init).resolve())
+        meta["parent_val_acc"] = parent_meta.get("val_acc")
+        meta["parent_samples"] = parent_meta.get("samples")
+    if args.note:
+        meta["note"] = args.note
     export_weights(model, args.hidden, Path(args.out), meta)
 
 

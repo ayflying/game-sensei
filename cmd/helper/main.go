@@ -48,6 +48,7 @@ import (
 	"github.com/ayflying/game-sensei/internal/gamewin"
 	"github.com/ayflying/game-sensei/internal/memory"
 	"github.com/ayflying/game-sensei/internal/overlay"
+	"github.com/ayflying/game-sensei/internal/plan"
 	"github.com/ayflying/game-sensei/internal/teacher"
 )
 
@@ -153,6 +154,10 @@ func main() {
 	flag.StringVar(&cfg.DemoOut, "demo-out", cfg.DemoOut, "示范数据落盘目录（空=.workbuddy/demos/<时间戳>）")
 	flag.BoolVar(&cfg.DemoColor, "demo-color", cfg.DemoColor, "同时保存老师看到的彩色帧，便于人工复核")
 	demoHints := flag.String("demo-hints", "", "额外的界面先验，多条用 ; 分隔（如摇杆中心坐标）")
+
+	// ---- 确定性计划执行（把已学会的流程固化：零模型、零推理成本）----
+	planMode := flag.Bool("plan", false,
+		"执行档案里的 plan 段：按固定步骤序列跑，用画面反馈推进，全程不调用老师模型（省钱提速）")
 
 	flag.StringVar(&cfg.Target, "target", cfg.Target, "控制目标：pc（本机键鼠）| android（ADB 遥控手机）")
 	flag.StringVar(&cfg.ADBPath, "adb", cfg.ADBPath, "adb 可执行文件路径（空=自动查找）")
@@ -384,6 +389,79 @@ func main() {
 	//
 	// 这条分支与下面的实时回路互斥：示范由老师「一步一决策」驱动，
 	// 节拍是秒级（老师单次 1.2s），塞进 30FPS 的回路只会不停丢帧。
+	//
+	// ---- 确定性计划执行（固化模式）----
+	//
+	// 与 -demo 的关系：demo 是「老师探索」（逐步问 VLM，贵且慢），
+	// 本分支是「把探索结果固化成 plan 后重复执行」（零模型、零成本）。
+	// 二者构成学习闭环：先 -demo 摸清流程 → 写进档案 plan → 用 -plan 反复跑。
+	//
+	// 放在 -demo 之前判断：显式要求固化执行时，不该再被老师回路接管。
+	if *planMode {
+		if prof == nil || prof.Plan == nil {
+			name := "（未指定档案）"
+			if prof != nil {
+				name = prof.Name
+			}
+			log.Fatalf("-plan 需要档案里配 plan 段，当前档案 %s 没有。\n"+
+				"   提示：先在档案 JSON 里加 \"plan\": {\"steps\": [...]}", name)
+		}
+		// plan 包不依赖 os，所以这里把信号翻译成一个可关闭的 struct 通道。
+		stop := make(chan struct{})
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			close(stop)
+		}()
+		loopNote := ""
+		if prof.Plan.Loop {
+			loopNote = "（循环执行，Ctrl+C 停止）"
+		}
+		p := prof.Plan
+		fmt.Printf("计划: %s —— %d 步%s\n", p.Name, len(p.Steps), loopNote)
+		for i, st := range p.Steps {
+			note := ""
+			if st.Until != nil {
+				switch st.Until.Type {
+				case plan.TypeStable:
+					note = " [等画面稳定]"
+				case plan.TypeTime:
+					note = fmt.Sprintf(" [等 %dms]", st.Until.Ms)
+				default:
+					note = " [等画面变化]"
+				}
+			}
+			if st.Repeat > 1 {
+				note += fmt.Sprintf(" ×%d", st.Repeat)
+			}
+			nm := st.Name
+			if nm == "" {
+				nm = st.Action
+			}
+			fmt.Printf("  %2d. %s → %s%s\n", i+1, nm, st.Action, note)
+		}
+		if !cfg.Live {
+			fmt.Println("⚠️  dry-run：计划会照常解析并按画面反馈推进，但不发送真实输入，加 -live 才真正操作")
+		}
+		logHook("计划模式启动（" + mode + "）")
+
+		runner := plan.NewRunner(be, plan.WithLogf(func(format string, args ...any) {
+			line := fmt.Sprintf(format, args...)
+			fmt.Println("  " + line)
+			logHook(line)
+		}))
+		stats, err := runner.Run(p, stop)
+		if err != nil {
+			log.Fatalf("计划执行异常: %v", err)
+		}
+		fmt.Printf("计划结束：%d 步 / %d 个动作 / 累计等待 %v / 条件超时 %d 次\n",
+			stats.Steps, stats.Actions, stats.Waited.Round(time.Millisecond), stats.Timeouts)
+		logHook(fmt.Sprintf("计划结束：%d 步 / %d 动作 / 超时 %d 次",
+			stats.Steps, stats.Actions, stats.Timeouts))
+		return
+	}
+
 	if cfg.Demo {
 		demoClient := teacher.NewClient(cfg.TeacherURL, cfg.TeacherModel, func() teacher.Options {
 			o := teacher.ActionOptions()

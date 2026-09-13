@@ -31,6 +31,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/ayflying/game-sensei/internal/plan"
 )
 
 //go:embed profiles/*.json
@@ -145,6 +147,12 @@ type Profile struct {
 	BattleDetect *BattleDetect `json:"battle_detect,omitempty"`
 	// Escape 卡死自愈脚本（可选）。见 EscapeProfile。
 	Escape *EscapeProfile `json:"escape,omitempty"`
+	// Plan 可选的**确定性执行计划**：把已经摸清的操作流程固化成步骤序列，
+	// 由 internal/plan 的执行器零模型跑完，不再调用老师 VLM（省钱、提速）。
+	//
+	// 这是「学习闭环」的落地方式：老师探索未知界面（贵、一次性），
+	// 摸清后写进 Plan（免费、可重复）。用画面反馈（until）代替死等时长。
+	Plan *plan.Plan `json:"plan,omitempty"`
 }
 
 // BattleDetect 是「是否处于回合战斗态」的像素判据。
@@ -408,6 +416,13 @@ func (p *Profile) normalize() error {
 	p.Name = strings.TrimSpace(p.Name)
 	if p.Name == "" {
 		return fmt.Errorf("缺少 name 字段")
+	}
+	// 计划若配了就静态校验到底：动作能不能解析、条件类型认不认识，
+	// 必须在加载档案时报出来，不能跑到一半才发现（与按钮字段校验同一原则）。
+	if p.Plan != nil {
+		if err := p.Plan.Validate(); err != nil {
+			return fmt.Errorf("plan 不合法: %w", err)
+		}
 	}
 	p.Move.Mode = MoveMode(strings.ToLower(strings.TrimSpace(string(p.Move.Mode))))
 	if p.Move.Mode == "" {

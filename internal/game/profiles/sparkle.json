@@ -1,0 +1,61 @@
+{
+  "name": "Sparkle",
+  "package": "com.yoyaworld.sparkle",
+  "orientation": "portrait",
+  "move": {
+    "mode": "none"
+  },
+  "buttons": [
+    {
+      "name": "level_entry",
+      "aliases": ["level", "stage", "关卡"],
+      "pos": [0.86, 0.485],
+      "note": "CITY 章节地图上的当前关卡入口（头像图标）。实测 1-6 位置。"
+    },
+    {
+      "name": "start",
+      "aliases": ["begin", "开局"],
+      "pos": [0.5, 0.66],
+      "note": "关卡说明弹窗里的 Start 按钮（弹窗同时显示本关达标条件）。"
+    },
+    {
+      "name": "advance",
+      "aliases": ["next", "continue", "继续"],
+      "pos": [0.5, 0.9],
+      "note": "对话/剧情推进按钮。剧情条数不固定，需配合 plan 的循环条件使用。"
+    },
+    {
+      "name": "next_after_result",
+      "aliases": ["result_next"],
+      "pos": [0.5, 0.955],
+      "note": "结算页（星级+社交反馈流）底部的 Next 按钮。"
+    },
+    {
+      "name": "replay",
+      "aliases": ["again", "重玩"],
+      "pos": [0.88, 0.155],
+      "note": "结算页右上角的重玩按钮（again）。"
+    }
+  ],
+  "hints": [
+    "本作为竖屏换装/造型评分游戏，无自由移动，全部操作是点击。",
+    "关卡说明弹窗会直接给出本关达标条件（如 Add accessories to drop that tag）。",
+    "装扮界面左上角 Style Tips 显示本关主题风格（如 Y2K），这是评分依据。",
+    "底部物品格分两行，每格左上角粉色心形为收藏标记，左下角 ▶ 表示看广告免费解锁。"
+  ],
+  "plan": {
+    "name": "验证：确定性执行器与画面反馈判据",
+    "steps": [
+      {
+        "name": "换一个发型（点第一格物品）",
+        "action": "ACTION TAP x=0.1 y=0.8",
+        "until": {
+          "type": "change",
+          "region": [0.0, 0.1, 1.0, 0.72],
+          "diff": 3
+        },
+        "timeout_ms": 4000
+      }
+    ]
+  }
+}
