@@ -50,6 +50,7 @@
 - 遇到 400 **不要原样重发同一批图**（必然再炸）；先削减图片**数量与体积**再重试。
 
 工具支持见 §6 的 `sp.py`（`shot` 自动出 `.s.jpg`、`pack` 批量压缩、`newest` 给可读路径）。
+跨项目通用工具：`python C:/Users/ay/.workbuddy/tools/shrink.py <图片或目录>`。
 
 ---
 
