@@ -1650,10 +1650,40 @@ go run ./cmd/helper -target android -adb <adb.exe> -serial <设备> -game <档�
 | `until.region` | 只比较这块归一化区域（`[x0,y0,x1,y1]`）。**强烈建议收窄**，见 12.4 |
 | `until.diff` | 灰度平均绝对差阈值，默认 4 |
 | `until.color` | `ratio` 的目标色 `[R,G,B]`，`tolerance` 默认 40 容差，`min_ratio` 默认 0.05 |
-| `timeout_ms` | 等待超时，默认 3000 |
-| `strict` | 超时是否算失败，**默认 false（宽松跳过）** |
+| `until.min_ratio` | `ratio` 正向：目标色占比 **≥** 该值才满足（「某 UI 出现了」） |
+| `until.max_ratio` | `ratio` 反向：目标色占比 **≤** 该值才满足（「某 UI 消失了」）。与 `min_ratio` 互斥 |
+| `timeout_ms` | 等待超时，默认 3000。**循环模式（max_repeat）下不生效**，由轮数上限控制 |
+| `strict` | 超时/跑满轮数是否算失败，**默认 false（宽松跳过）** |
 
-### 12.4 ⚠️ 实测数据与两个坑
+**`max_ratio`：判「某 UI 消失了」**（2026-09-13 新增）
+
+多数推进是「等某 UI 出现」，但有些场景只能靠「某 UI 消失」判断：
+
+- 评审页的进度条消失 = 本局评审结束，可以进结算；
+- 加载转圈消失 = 场景切换完成。
+
+这些「离开某状态」的信号用「出现了什么」表达不了。实测反例：Sparkle 结算页
+**没有专属颜色**——紫色按钮在结算页占 46%、在 SALE 弹窗的价格按钮上占 54%，
+两者根本分不开。判「绿条没了」反而是唯一稳的判据。
+
+```json
+{ "type": "ratio", "region": [0.0, 0.78, 1.0, 0.86],
+  "color": [77, 224, 114], "tolerance": 40, "max_ratio": 0.005 }
+```
+
+**动作尽量用 `PRESS name=<按钮名>`，不要直接写坐标**
+
+`ACTION TAP x=.. y=..` 与 `buttons[].pos` 是**两份坐标**，改一处必然漂移
+（2026-09-13 实测踩到：把 `start.pos` 改成 `[0.5,0.784]` 却忘了同步 plan 里的
+`ACTION TAP x=0.784`，结果点到卡片区、流程走偏）。
+
+用 `ACTION PRESS name=start` 让坐标只存一份，后端 `Apply` 会经档案解析：
+
+```json
+{ "name": "点 Start 进本关", "action": "ACTION PRESS name=start" }
+```
+
+### 12.4 ⚠️ 实测数据与四个坑
 
 **提速效果（真机实测 2026-09-13，MuMu 模拟器 + Sparkle）**
 
@@ -1661,6 +1691,7 @@ go run ./cmd/helper -target android -adb <adb.exe> -serial <设备> -game <档�
 |---|---|
 | 死等固定时长（新手写法） | 4.07s |
 | **改为等画面变化** | **973ms** |
+| **整份 5 步计划端到端** | **14.6~18.8s，零模型调用** |
 
 **坑一：`change` 会被插播广告骗过**
 

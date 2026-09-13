@@ -279,15 +279,19 @@ func (*fakeErr) Error() string { return "fake grab error" }
 
 // fakeColorExec 在图 Grab 之外还能吐彩色帧，用于测 ratio 条件。
 //
-// colorFrames 每被 GrabColor 取一次就前进一帧（到末尾停住），
+// colorFrames 每被取一次就前进一帧（到末尾停住），
 // 于是「目标色什么时候出现」完全由测试决定。
+//
+// 方法名是 GrabColorFresh：与后端一致，强调每次都是「新的一帧」——
+// 这正是 ratio 轮询成立的前提（若返回缓存帧，轮询判据会失效，
+// 见 plan.ColorGrabber 的说明）。
 type fakeColorExec struct {
 	fakeExec
 	colorFrames []image.Image
 	colorIdx    int
 }
 
-func (f *fakeColorExec) GrabColor() (image.Image, error) {
+func (f *fakeColorExec) GrabColorFresh() (image.Image, error) {
 	if len(f.colorFrames) == 0 {
 		return nil, nil
 	}
@@ -401,8 +405,9 @@ func TestLoopHitsLimitStrict(t *testing.T) {
 
 // TestRatioNeedsColorBackend 验证后端不支持彩色抓帧时给出明确报错，
 // 而不是静默地「永远不满足」。
+// TestRatioNeedsColorBackend 验证「后端没有新鲜彩帧能力」时给明确报错，不静默失败。
 func TestRatioNeedsColorBackend(t *testing.T) {
-	fe := &fakeExec{} // 没有 GrabColor
+	fe := &fakeExec{} // 没有 GrabColorFresh
 	r := NewRunner(fe, noSleep(t))
 	p := &Plan{Steps: []Step{{
 		Action:    "ACTION TAP x=0.5 y=0.9",
@@ -413,6 +418,48 @@ func TestRatioNeedsColorBackend(t *testing.T) {
 	if _, err := r.Run(p, nil); err == nil {
 		t.Error("后端不支持彩色抓帧时应报错")
 	}
+}
+
+// TestRatioRequiresFreshFrames 锁定 2026-09-13 修掉的缺陷：// ratio 是轮询判据，**每一轮都必须基于新画面**。这里用「只返回缓存帧、
+// 永不更新」的假后端模拟安卓 GrabColor 的旧行为，正确实现下应当
+// 在轮数上限内拿不到目标色而宽松结束（Timeouts>0），
+// 而不是靠同一张旧帧「命中」。
+//
+// 若哪天有人把 GrabColorFresh 改回返回缓存，本测试会立刻变红：
+// 因为缓存帧是「非目标色」，永远不该命中；命中即实现出错。
+func TestRatioRequiresFreshFrames(t *testing.T) {
+	cached := solid(0, 0, 255) // 缓存帧：蓝色，不是目标色
+	f := &cachedOnlyExec{cached: cached}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Action:    "ACTION TAP x=0.5 y=0.9",
+		MaxRepeat: 3,
+		GapMs:     1,
+		Until: &Until{Type: TypeRatio,
+			Color: [3]int{255, 0, 0}, MinRatio: 0.5},
+	}}}
+	st, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("宽松模式不该失败: %v", err)
+	}
+	if st.Timeouts != 1 {
+		t.Errorf("画面始终不含目标色时应记一次超时，得到 Timeouts=%d", st.Timeouts)
+	}
+	if f.calls != 3 {
+		t.Errorf("每轮都应取一次新鲜帧，期望 3 次抓帧，实际 %d", f.calls)
+	}
+}
+
+// cachedOnlyExec 模拟「后端有彩帧能力但每轮返回同一张缓存」的行为。
+type cachedOnlyExec struct {
+	fakeExec
+	cached image.Image
+	calls  int
+}
+
+func (f *cachedOnlyExec) GrabColorFresh() (image.Image, error) {
+	f.calls++
+	return f.cached, nil
 }
 
 // TestColorRatio 验证占比计算与区域裁剪。
@@ -435,5 +482,57 @@ func TestColorRatio(t *testing.T) {
 	// 空区域 -> 0，不 panic。
 	if got := colorRatio(img, image.Rect(0, 0, 0, 0), u); got != 0 {
 		t.Errorf("空区域占比 = %v，期望 0", got)
+	}
+}
+
+// TestRatioDisappear 验证 max_ratio 的「目标色消失」语义。
+//
+// 缘起（2026-09-13 实测）：评审页的绿色进度条消失 = 本局结束，
+// 而结算页没有专属颜色（紫色按钮在结算页 46%、SALE 弹窗价格按钮 54%，
+// 分不开），所以「等绿条消失」是唯一可靠的推进判据。
+func TestRatioDisappear(t *testing.T) {
+	u := &Until{Type: TypeRatio, Color: [3]int{77, 224, 114}, MaxRatio: 0.01}
+
+	// 画面还有绿条（占比高）-> 未满足「消失」。
+	has := solid(77, 224, 114)
+	if u.ratioSatisfied(has, image.Rect(0, 0, 40, 40)) {
+		t.Error("绿条仍在时不该算满足")
+	}
+	// 画面没有绿条 -> 满足。
+	gone := solid(20, 30, 40)
+	if !u.ratioSatisfied(gone, image.Rect(0, 0, 40, 40)) {
+		t.Error("绿条消失后应算满足")
+	}
+}
+
+// TestRatioDisappearInWait 验证 waitUntil 走的是同一条 max_ratio 语义
+// （两个调用点共用 ratioSatisfied，这里守一道，避免将来只改一处）。
+func TestRatioDisappearInWait(t *testing.T) {
+	f := &cachedOnlyExec{cached: solid(20, 30, 40)} // 无绿条
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Action: "ACTION WAIT",
+		Until: &Until{Type: TypeRatio, Color: [3]int{77, 224, 114}, MaxRatio: 0.01,
+			Region: [4]float64{0, 0, 1, 1}, Ms: 1},
+		TimeoutMs: 500,
+	}}}
+	st, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("不该失败: %v", err)
+	}
+	if st.Timeouts != 0 {
+		t.Errorf("目标色已消失，等待应立即满足，Timeouts=%d", st.Timeouts)
+	}
+}
+
+// TestValidateRejectsBothRatioBounds 验证 min_ratio 与 max_ratio 互斥。
+func TestValidateRejectsBothRatioBounds(t *testing.T) {
+	p := &Plan{Steps: []Step{{
+		Action: "ACTION WAIT",
+		Until: &Until{Type: TypeRatio, Color: [3]int{77, 224, 114},
+			MinRatio: 0.05, MaxRatio: 0.01},
+	}}}
+	if err := p.Validate(); err == nil {
+		t.Error("min_ratio 与 max_ratio 同时给出时应报错")
 	}
 }

@@ -143,6 +143,10 @@ func (b *pcBackend) GrabColor() (image.Image, error) {
 	return capture.GrabColor()
 }
 
+// GrabColorFresh 与 GrabColor 等价：PC 侧本来就是每次真做一次 BitBlt，
+// 没有缓存概念。分开命名只为满足 plan 的显式诉求（见 plan.ColorGrabber）。
+func (b *pcBackend) GrabColorFresh() (image.Image, error) { return b.GrabColor() }
+
 func (b *pcBackend) Apply(act agent.Action) error {
 	resolved, err := b.Resolve(act)
 	if err != nil {
@@ -191,10 +195,24 @@ func (b *adbBackend) Grab(downWidth int) (*image.Gray, error) { return b.dev.Gra
 
 // GrabColor 直接复用已解码的截图：Screenshot 会缓存最近一帧彩色图，
 // 老师路径与感知路径在同一拍上通常只差几毫秒，没必要再截一次。
+//
+// ⚠️ 这是「可能过期」的一帧，只适合知道自己在要同一拍画面的调用方（老师）。
+// 需要「现在这一刻」的画面必须用 GrabColorFresh。
 func (b *adbBackend) GrabColor() (image.Image, error) {
 	if c := b.dev.LastColor(); c != nil {
 		return c, nil
 	}
+	return b.dev.Screenshot()
+}
+
+// GrabColorFresh 强制重新截一帧。
+//
+// 为什么必须和 GrabColor 分开（2026-09-13 实测）：plan 的 ratio 条件靠**轮询**
+// 判断「某 UI 是否出现」。安卓 screencap 单帧约 0.94s，GrabColor 会把它缓存起来
+// 复用；若轮询每次拿到的都是同一张缓存帧，占比结果恒定不变——条件要么第一轮
+// 立刻成立、要么永远不成立，循环判据彻底失效。这里宁可多花一次截图时间，
+// 也要保证每次判定基于真实当前画面。
+func (b *adbBackend) GrabColorFresh() (image.Image, error) {
 	return b.dev.Screenshot()
 }
 

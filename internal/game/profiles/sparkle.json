@@ -15,14 +15,26 @@
     {
       "name": "start",
       "aliases": ["begin", "开局"],
-      "pos": [0.5, 0.66],
-      "note": "关卡说明弹窗里的 Start 按钮（弹窗同时显示本关达标条件）。"
+      "pos": [0.5, 0.784],
+      "note": "主题选择页的 Start 按钮（紫色）。实测居中，y≈0.784；x 必须 0.5，写成 0.784 会点到卡片区导致走偏。"
+    },
+    {
+      "name": "exit_result",
+      "aliases": ["exit", "退出结算"],
+      "pos": [0.5, 0.891],
+      "note": "WINNER/LOSE 结算页底部的紫色 Exit 按钮。回主界面用。"
+    },
+    {
+      "name": "theme_card",
+      "aliases": ["card", "主题卡"],
+      "pos": [0.43, 0.66],
+      "note": "主题选择页中间偏左的主题卡片。⚠️ 实测主题页有**两种布局变体**：有的带紫色 Start 按钮，有的没有、点卡片直接进关。本按钮用于后者。"
     },
     {
       "name": "advance",
       "aliases": ["next", "continue", "继续"],
       "pos": [0.5, 0.9],
-      "note": "对话/剧情推进按钮。剧情条数不固定，需配合 plan 的循环条件使用。"
+      "note": "对话/剧情推进按钮。剧情条数不固定，需配合 plan 的 max_repeat 循环使用。"
     },
     {
       "name": "next_after_result",
@@ -35,26 +47,101 @@
       "aliases": ["again", "重玩"],
       "pos": [0.88, 0.155],
       "note": "结算页右上角的重玩按钮（again）。"
+    },
+    {
+      "name": "win_vs",
+      "aliases": ["vs", "对战", "比赛"],
+      "pos": [0.696, 0.897],
+      "note": "主界面右下角 Win VS 入口。实测进关路径：Win VS -> 主题选择 -> Start。坐标经暗色段扫描标定：x=0.696 y=0.897（写 0.68/0.885 会点偏到左边 Dress 进入衣柜）。"
+    },
+    {
+      "name": "shop",
+      "aliases": ["store", "商店"],
+      "pos": [0.929, 0.437],
+      "note": "主界面右侧竖排第 2 个按钮（购物车图标）。"
+    },
+    {
+      "name": "mail",
+      "aliases": ["邮件"],
+      "pos": [0.929, 0.362],
+      "note": "主界面右侧竖排第 1 个按钮（信封图标）。"
+    },
+    {
+      "name": "menu_phone",
+      "aliases": ["phone", "手机"],
+      "pos": [0.929, 0.735],
+      "note": "主界面右侧手机图标（带红色角标数字）。"
+    },
+    {
+      "name": "popup_close",
+      "aliases": ["close", "关闭"],
+      "pos": [0.85, 0.185],
+      "note": "通用弹窗关闭（SALE/活动弹窗右上 ×）。⚠️ 实测 SALE 会多页叠弹、× 逐页漂移，固定坐标单点会漏，必须用 max_repeat 连点。"
     }
   ],
   "hints": [
     "本作为竖屏换装/造型评分游戏，无自由移动，全部操作是点击。",
     "关卡说明弹窗会直接给出本关达标条件（如 Add accessories to drop that tag）。",
     "装扮界面左上角 Style Tips 显示本关主题风格（如 Y2K），这是评分依据。",
-    "底部物品格分两行，每格左上角粉色心形为收藏标记，左下角 ▶ 表示看广告免费解锁。"
+    "底部物品格分两行，每格左上角粉色心形为收藏标记，左下角 ▶ 表示看广告免费解锁。",
+    "⚠️ 对手会同步抄袭玩家装扮并逐个展示（Lucy -> Mamie），进度条落后时会由绿变红。",
+    "⚠️ 弹窗会连环自动轮播（SALE 新装、活动），需连点 × 或按返回键清掉。",
+    "⚠️ 冷启动必现 Google Play Games 选账号弹窗，点右下继续跨过。"
   ],
   "plan": {
-    "name": "验证：确定性执行器与画面反馈判据",
+    "name": "端到端：主界面 -> Win VS -> 主题 -> 进关 -> 评审 -> 结算 -> 回主界面",
     "steps": [
       {
-        "name": "换一个发型（点第一格物品）",
-        "action": "ACTION TAP x=0.1 y=0.8",
+        "name": "清残留弹窗（SALE 多页叠弹，连点关闭直到露出主界面的 ADS 红标）",
+        "action": "ACTION PRESS name=popup_close",
+        "max_repeat": 6,
+        "gap_ms": 1600,
         "until": {
-          "type": "change",
-          "region": [0.0, 0.1, 1.0, 0.72],
-          "diff": 3
+          "type": "ratio",
+          "region": [0.05, 0.235, 0.155, 0.295],
+          "color": [139, 1, 64],
+          "tolerance": 50,
+          "min_ratio": 0.06
         },
-        "timeout_ms": 4000
+        "strict": false
+      },
+      {
+        "name": "点 Win VS 进主题选择",
+        "action": "ACTION PRESS name=win_vs",
+        "until": {
+          "type": "ratio",
+          "region": [0.0, 0.76, 1.0, 0.82],
+          "color": [110, 93, 236],
+          "tolerance": 40,
+          "min_ratio": 0.03
+        },
+        "timeout_ms": 6000
+      },
+      {
+        "name": "进关（幂等）：点 Start 位；有 Start 的变体直接生效，无 Start 的变体此处即主题卡片位",
+        "action": "ACTION PRESS name=start",
+        "max_repeat": 3,
+        "gap_ms": 2500,
+        "until": {
+          "type": "ratio",
+          "region": [0.0, 0.84, 1.0, 0.95],
+          "color": [255, 255, 255],
+          "tolerance": 10,
+          "min_ratio": 0.15
+        },
+        "strict": false
+      },
+      {
+        "name": "结算收尾：点 Exit 回主界面",
+        "action": "ACTION PRESS name=exit_result",
+        "until": {
+          "type": "ratio",
+          "region": [0.05, 0.235, 0.155, 0.295],
+          "color": [139, 1, 64],
+          "tolerance": 50,
+          "min_ratio": 0.06
+        },
+        "strict": false
       }
     ]
   }
