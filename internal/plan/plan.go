@@ -105,6 +105,19 @@ type Until struct {
 	// MinRatio 是 ratio 类型的占比下限（0~1，默认 0.05）。
 	MinRatio float64 `json:"min_ratio,omitempty"`
 
+	// MaxRatio > 0 时把 ratio 语义**反转**为「目标色消失」：占比 <= MaxRatio 才算满足。
+	//
+	// 为什么需要（2026-09-13 实测遇到的真实缺口）：多数推进是「等某 UI 出现」，
+	// 但也有大量场景只能靠「某 UI 消失」判断——例如
+	//   - 评审页的绿色进度条消失 = 本局评审结束，可以进结算；
+	//   - 加载转圈消失 = 场景切换完成。
+	// 这些「离开某状态」的信号，用「出现了什么」表达不了：结算页并没有一个
+	// 独属于自己的颜色（实测紫色按钮在结算页与 SALE 弹窗价格按钮上同时出现，
+	// 占比 46% vs 54%，根本分不开）。判「绿条没了」反而是唯一稳的判据。
+	//
+	// 与 MinRatio 互斥：同时给会报错，避免出现「既要 >=a 又要 <=b」的歧义条件。
+	MaxRatio float64 `json:"max_ratio,omitempty"`
+
 	// Ms time 类型的时长；change/stable/ratio 类型下作为轮询间隔。
 	// 留空时 change/stable/ratio 用 120ms，time 用 Step.GapMs（再不行 300ms）。
 	Ms int `json:"ms,omitempty"`
@@ -147,13 +160,20 @@ type Executor interface {
 	Apply(act agent.Action) error
 }
 
-// ColorGrabber 是可选能力：能抓彩色帧。
+// ColorGrabber 是可选能力：能抓**当前**彩色帧。
 //
 // ratio 条件需要颜色信息，灰度帧做不到。做成**可选接口**而不是塞进 Executor，
 // 是为了不强迫每个后端实现它（测试用的假后端就不需要），
 // 用到 ratio 时再断言，缺了就给明确的报错。
+//
+// 注意方法名带 Fresh：必须是「现在抓一帧」，不能返回缓存。
+// 起因（2026-09-13 实测）：安卓后端的 GrabColor 会复用最近一次截图缓存
+// （那是给老师用的——老师与感知在同拍上只差几毫秒，复用可省一次约 0.94s
+// 的 screencap）。但 ratio 是**轮询**判据：若每次都拿同一张缓存帧，
+// 条件要么立刻成立要么永不成立，轮询完全失去意义。故这里刻意用不同方法名，
+// 把「要新鲜帧」这个诉求显式化——命名不同，实现者必须单独想一次。
 type ColorGrabber interface {
-	GrabColor() (image.Image, error)
+	GrabColorFresh() (image.Image, error)
 }
 
 // 默认抓帧降采样宽度。差异检测不需要清晰画面，越小越快：
@@ -257,6 +277,13 @@ func (p *Plan) Validate() error {
 						return fmt.Errorf("plan %q 第 %d 步（%s）ratio 的 color 分量须在 0~255",
 							p.Name, i+1, st.Name)
 					}
+				}
+				// min_ratio 与 max_ratio 语义相反（出现 vs 消失），同时给是配置错误：
+				// 若两个都写，判据会变成「a<=x<=b」这种谁也不想要的东西。
+				if r.MinRatio > 0 && r.MaxRatio > 0 {
+					return fmt.Errorf("plan %q 第 %d 步（%s）ratio 的 min_ratio 与 max_ratio 互斥："+
+						"min_ratio 判「目标色出现」，max_ratio 判「目标色消失」，只能给一个",
+						p.Name, i+1, st.Name)
 				}
 			}
 			if st.MaxRepeat < 0 {
@@ -433,14 +460,27 @@ func (r *Runner) checkOnce(u *Until) (bool, error) {
 	}
 	cg, ok := r.exec.(ColorGrabber)
 	if !ok {
-		return false, fmt.Errorf("ratio 条件需要后端支持彩色抓帧（GrabColor），当前后端没有")
+		return false, fmt.Errorf("ratio 条件需要后端支持彩色抓帧（GrabColorFresh），当前后端没有")
 	}
-	img, err := cg.GrabColor()
+	img, err := cg.GrabColorFresh()
 	if err != nil || img == nil {
 		return false, nil
 	}
 	region := normRegion(u.Region, img.Bounds())
-	return colorRatio(img, region, u) >= u.minRatio(), nil
+	return u.ratioSatisfied(img, region), nil
+}
+
+// ratioSatisfied 判定一张彩帧是否满足 ratio 条件。
+//
+// 正向（默认）：目标色占比 >= min_ratio —— 「某 UI 出现了」。
+// 反向（给了 max_ratio）：占比 <= max_ratio —— 「某 UI 消失了」。
+// 两种语义共用一个实现，保证 checkOnce（循环）与 waitUntil（等待）行为一致。
+func (u *Until) ratioSatisfied(img image.Image, region image.Rectangle) bool {
+	got := colorRatio(img, region, u)
+	if u.MaxRatio > 0 {
+		return got <= u.MaxRatio
+	}
+	return got >= u.minRatio()
 }
 
 // minRatio 返回占比阈值（默认 0.05）。
@@ -535,9 +575,9 @@ func (r *Runner) waitUntil(st *Step, base *image.Gray) (bool, time.Duration) {
 			if !r.now().Before(deadline) {
 				return false, r.now().Sub(start)
 			}
-			img, err := cg.GrabColor()
+			img, err := cg.GrabColorFresh()
 			if err == nil && img != nil {
-				if colorRatio(img, normRegion(u.Region, img.Bounds()), u) >= u.minRatio() {
+				if u.ratioSatisfied(img, normRegion(u.Region, img.Bounds())) {
 					return true, r.now().Sub(start)
 				}
 			}
@@ -604,6 +644,10 @@ func describeUntil(u *Until) string {
 	case TypeStable:
 		return "画面稳定"
 	case TypeRatio:
+		if u.MaxRatio > 0 {
+			return fmt.Sprintf("区域 RGB(%d,%d,%d) 消失（占比<=%.1f%%）",
+				u.Color[0], u.Color[1], u.Color[2], u.MaxRatio*100)
+		}
 		return fmt.Sprintf("区域出现 RGB(%d,%d,%d) 占比>=%.1f%%",
 			u.Color[0], u.Color[1], u.Color[2], u.minRatio()*100)
 	case TypeTime, "":

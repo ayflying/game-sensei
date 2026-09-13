@@ -428,9 +428,19 @@ func main() {
 					note = " [等画面稳定]"
 				case plan.TypeTime:
 					note = fmt.Sprintf(" [等 %dms]", st.Until.Ms)
+				case plan.TypeRatio:
+					if st.Until.MaxRatio > 0 {
+						note = fmt.Sprintf(" [等目标色消失 占比≤%.0f%%]", st.Until.MaxRatio*100)
+					} else {
+						note = fmt.Sprintf(" [等目标色出现 diff色差≤%d 占比≥%.0f%%]",
+							st.Until.Tolerance, st.Until.MinRatio*100)
+					}
 				default:
 					note = " [等画面变化]"
 				}
+			}
+			if st.MaxRepeat > 0 {
+				note += fmt.Sprintf("（最多 %d 轮，看画面收手）", st.MaxRepeat)
 			}
 			if st.Repeat > 1 {
 				note += fmt.Sprintf(" ×%d", st.Repeat)
