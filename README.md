@@ -102,7 +102,7 @@ game-sensei/
 │   ├── student/              # 量化学生：纯 Go CNN 前向，加载 .weights.json（见 §11.2.1）
 │   ├── memory/               # 轨迹缓冲
 │   └── config/               # 帧率/降采样/动作集/目标平台/游戏档案（按游戏可配）
-├── models/                   # *.weights.json（trainer 导出的学生权重，不入库）
+├── models/                   # *.weights.json（trainer 导出的学生权重，约 71 KB/个，入库）
 ├── tools/                    # 本地测试工具（非运行时依赖）
 │   ├── serve_ollama.sh       # 启动项目自带的 Ollama 实例（独立端口 11435）
 │   ├── grid_overlay.py       # 截图打归一化网格，用于校准新游戏的摇杆/按钮坐标
@@ -859,6 +859,7 @@ mp4 ──ffmpeg 定频抽帧──> 原始帧 ──dHash 去重──> 关键�
   另记一个跨模块坑：`trainer/train.py` 的 `map_action()` 认的是**原始轨迹 kind**
   （`move`/`key`/`joy`），不是目标类别（`up`/`press`），按直觉输出会静默丢样本
   （实测 1472 只剩 841）。
+- 若要把这版弱标签数据先训成**管线基线**、后续用真机示范 `--init` 加训，见 §11.12。
 
 ---
 
@@ -1050,7 +1051,53 @@ trajectory.jsonl + frames/  →  trainer/train.py  →  models/*.weights.json  �
 
 **新增观察（与本轮无关，待单独处理）**：`pet_run14` 后段（step 47~60）在战斗态反复进出，
 老师交替 `cast_hetu` ↔ `battle_catch`，横跳窗口 5/55、🔁 告警 2 次。属「战斗内策略打转」
-（技能/投球/聚能之间的取舍），不是移动治理的回归，需另找判据。
+  （技能/投球/聚能之间的取舍），不是移动治理的回归，需另找判据。
+
+### 11.12 学生模型训练与增量训练（2026-09-13）
+
+训练器 `trainer/train.py`（torch，CPU）吃 `trajectory.jsonl + frames/`，吐出**纯 JSON 权重**
+（`models/*.weights.json`，约 71 KB/个，入库），Go 侧 `internal/student` 直接前向——零 CGO。
+
+**全新训练：**
+
+```bash
+PY=C:/Users/ay/.workbuddy/binaries/python/envs/default/Scripts/python.exe
+$PY trainer/train.py --data <数据集目录> --out models/<名字>.weights.json --epochs 60
+```
+
+**增量训练**（在已有模型上继续训——后续真机示范到了走这条）：
+
+```bash
+$PY trainer/train.py \
+    --data .workbuddy/demos/nrc_real_01 \
+    --init models/video_v1.weights.json \
+    --freeze-backbone \
+    --epochs 30 --lr 3e-4 \
+    --out models/video_v1_real_v1.weights.json
+```
+
+- `--init <weights.json>`：从已有权重**热启动**。任一不一致（格式 / 版本 / `hidden` /
+  类别顺序 / 字段长度）都**直接报错退出**——静默退回随机权重是最坏结果：
+  看着像「加训」，实际是重训，而且不会有人发现。
+- `--freeze-backbone`：冻结三层卷积、只训 `fc` 与两个头。真机样本常只有几十条，
+  全量微调会把预训练视觉特征冲掉（灾难性遗忘）；冻结骨干只让「决策头」适配新数据更稳。
+- **血缘可追溯**：产物 `meta` 记 `parent` / `parent_val_acc` / `parent_samples`，
+  外加 `epochs` / `lr` / `batch` / `seed` / `git_commit`，满足 DEVELOPMENT_PLAN §7 的要求。
+
+**`val_acc` 的边界**：校验集小或类别极不均衡时它会被众数类主导——**只能判断「有没有在学」，
+不能当能力指标**。见 §9.6 的 mode collapse 实测。
+
+**模型文件**：`models/*.weights.json` 入库（跟代码走）；数据集（帧图）体积大留在仓库外，
+`meta.trained_on` 记录其路径。数据集版本对照：
+
+| 权重 | 数据来源 | 样本 | val_acc | 定位 |
+|---|---|---|---|---|
+| `video_v1.weights.json` | `dataset_v2`（视频判读弱标签） | 1419 | **52.36%** | 管线基线；**不是可用模型**（恒输出 `tap`） |
+| `jieyou_v1/v2` | jieyou 真机示范 | 60 | 66.67% | 首次真机示范（标签真实） |
+
+`video_v1` 的价值在于：**打通「训练 → 导出 → Go 加载 → 运行时决策」全链路并固定增量训练入口**，
+为真机示范数据到位后直接 `--init` 加训铺好路。它的 52.36% 不是能力，是众数类占比（见 §9.6）。
+
 ---
 
 ## 12. 确定性执行计划（`-plan`）：把「学会的流程」固化，不再让大模型一直盯着
