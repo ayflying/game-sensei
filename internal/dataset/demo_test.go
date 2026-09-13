@@ -168,11 +168,24 @@ func TestKindName(t *testing.T) {
 		agent.ActionJoystick:  "joy",
 		agent.ActionKey:       "key",
 		agent.ActionMove:      "move",
+		agent.ActionPress:     "press",
 		agent.ActionNone:      "none",
 	}
 	for k, want := range cases {
 		if got := KindName(k); got != want {
 			t.Errorf("KindName(%v)=%q, 期望 %q", k, got, want)
+		}
+	}
+	// 反向钉死：**所有会被落盘的**动作类型都必须有名字，不许再出现「漏分支静默变 none」。
+	// 这样以后新增 ActionKind 时，这条会在改 KindName 之前就红。
+	// ActionMouseMove（L2 鼠标相对移动）不进示范数据集，故不在其列。
+	recorded := []agent.ActionKind{
+		agent.ActionNone, agent.ActionKey, agent.ActionMove, agent.ActionTap,
+		agent.ActionSwipe, agent.ActionLongPress, agent.ActionJoystick, agent.ActionPress,
+	}
+	for _, k := range recorded {
+		if got := KindName(k); got == "none" && k != agent.ActionNone {
+			t.Errorf("动作类型 %v 落到了 default(\"none\")，KindName 漏了分支", k)
 		}
 	}
 }

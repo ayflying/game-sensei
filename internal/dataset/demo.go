@@ -208,6 +208,12 @@ func (w *Writer) Close() error {
 }
 
 // KindName 返回动作类型名，用于数据集与报告。
+//
+// ⚠️ 每个动作类型都必须在这里有分支：漏一个不会报错，只会静默落到 default 的
+// "none"。实测踩坑（2026-09-13）：ActionPress（按命名按钮，如 press:cast_hetu /
+// press:gather_energy）此前没有分支，于是战斗示范里**最该学的那些动作**全被记成
+// "none"，训练器按 "none" 读进去，学生学到的是「战斗里什么都不做」——数据看着有
+// 几十条，实际把正确行为标成了反面样本。
 func KindName(k agent.ActionKind) string {
 	switch k {
 	case agent.ActionTap:
@@ -222,6 +228,8 @@ func KindName(k agent.ActionKind) string {
 		return "key"
 	case agent.ActionMove:
 		return "move"
+	case agent.ActionPress:
+		return "press"
 	default:
 		return "none"
 	}

@@ -189,6 +189,18 @@ type BattleDetect struct {
 	TolY float64 `json:"tol_y,omitempty"`
 	// MinHits 至少要命中的标定位置数；缺省取 MinClusters（洛克王国=3）。
 	MinHits int `json:"min_hits,omitempty"`
+	// LocalRIn / LocalROut 是「局部对比度指纹」的内盘与外环半径（按帧宽归一化）。
+	//
+	// 这条判据与列投影互补，专治列投影**对整幅亮度不鲁棒**：列投影是全局统计，
+	// 场景背景一亮，列峰被抬高，15% 列阈值就把真正的圆钮淹没了。实测
+	// （2026-09-13，洛克王国真机）同一场战斗里，用「按战斗独有的逃跑钮」独立验证，
+	// 确认在战斗中的两帧被列投影判成 world（底部圆钮与深蓝条对比度仍有 +18~+27）。
+	// 局部指纹只看每个标定位置的内盘亮度相对外环的**差值**，与整幅亮度无关。
+	LocalRIn  float64 `json:"local_r_in,omitempty"`
+	LocalROut float64 `json:"local_r_out,omitempty"`
+	// LocalContrast 内盘平均亮度要比外环高多少，才算「这个位置上有个圆钮」。
+	// 缺省 18。实测（3200x2136）：真实战斗圆钮 +18~+96；世界态同一批位置 -61~+3。
+	LocalContrast float64 `json:"local_contrast,omitempty"`
 }
 
 // tolerances 返回位置匹配容差，缺省 0.015。

@@ -2,6 +2,7 @@ package game
 
 import (
 	"image"
+	"math"
 )
 
 // detect.go 在游戏档案里内建「回合战斗态」的像素判定，使回路不必依赖外部
@@ -44,13 +45,25 @@ func rgbSampler(img image.Image) pixelRGB {
 		}
 	}
 }
+
 // IsBattle 用档案判据判断一帧是否处于回合战斗态。未配判据或图像为空时返回 false。
 //
 // 入参用彩色全分辨率帧（与 detect_state.py 的标定基准一致）。
+//
+// 判据由两条**互补**的路径组成，任一成立即判战斗——2026-09-13 真机实测：单靠
+// 列投影会把真实战斗判成 world（见 battleByLocalContrast 的注释），故补了一条
+// 不做全局统计的局部指纹判据。
 func (p *Profile) IsBattle(img image.Image) bool {
 	if !p.CanDetectBattle() || img == nil {
 		return false
 	}
+	return p.battleByColumns(img) || p.battleByLocalContrast(img)
+}
+
+// battleByColumns 是 2026-09-12 标定的原判据：检测带内「亮且低饱和」像素的列投影，
+// 连通亮列簇，簇质心落到标定位置够多即判战斗。优点是有位置约束、大地图不误报；
+// 缺点是**全局**统计——背景一亮，列峰被抬高，15% 列阈值就把真正的圆钮淹没。
+func (p *Profile) battleByColumns(img image.Image) bool {
 	d := p.BattleDetect
 	bright, minPixels, minClusters := d.defaults()
 	satMax := d.SatMax
@@ -103,7 +116,7 @@ func (p *Profile) IsBattle(img image.Image) bool {
 	if maxCol == 0 {
 		return false
 	}
-	colThresh := maxCol*15/100
+	colThresh := maxCol * 15 / 100
 	// 簇宽下限：Python 用 20 列（约占检测带宽的 1.4%），这里按比例换算并保底 8 列。
 	minRunCols := bandW * 14 / 1000
 	if minRunCols < 8 {
@@ -165,6 +178,101 @@ func (p *Profile) IsBattle(img image.Image) bool {
 				hits++
 				break
 			}
+		}
+	}
+	return hits >= minHits
+}
+
+// battleByLocalContrast 在标定位置上用**局部对比度**找圆钮：内盘（半径 LocalRIn）
+// 平均亮度比外环（LocalRIn~LocalROut）高出 LocalContrast，且内盘本身够亮、低饱和，
+// 就算这个位置有圆钮；命中够 MinHits 个位置即判战斗。
+//
+// 为什么需要第二条判据（2026-09-13 真机实证，不是推测）：
+//
+//	同一场战斗里，`_flee.before.png`（按「逃跑」前后各截一帧，逃跑生效 Δ=80.5，
+//	证明当时确实在战斗）被 battleByColumns 判成 world；而 `_flee.png`（逃跑之后，
+//	真的在世界态）判 world 是对的。也就是说原判据在**真战斗上会漏判**，
+//	而漏判的代价是连锁的：提示词给出 MOVE → 老师推摇杆（战斗里没有摇杆，必然无效）
+//	→ 白耗一整步并污染示范数据。实测那次 60 步真机示范里角色 Δ 恒在 1~2，
+//	老师原地打转，全轮数据作废。
+//
+//	局部指纹那一帧的读数是 bar1~bar3 +50/+57/+63、bar5 +60，即圆钮**仍然亮于**
+//	周边深蓝条，只是被背景拉高的列峰压掉了。换成局部量测就稳。
+//
+// 位置约束照旧：只有落在档案标定位置上的才计数，大地图上的散乱图标无法同时落位。
+func (p *Profile) battleByLocalContrast(img image.Image) bool {
+	d := p.BattleDetect
+	if d == nil || len(d.Positions) == 0 {
+		return false
+	}
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 {
+		return false
+	}
+	bright, _, _ := d.defaults()
+	satMax := d.SatMax
+	if satMax <= 0 {
+		satMax = 70
+	}
+	rIn, rOut, contrastMin := d.LocalRIn, d.LocalROut, d.LocalContrast
+	if rIn <= 0 {
+		rIn = 0.011
+	}
+	if rOut <= 0 {
+		rOut = 0.026
+	}
+	if contrastMin <= 0 {
+		contrastMin = 18
+	}
+	minHits := d.MinHits
+	if minHits <= 0 {
+		minHits = 4
+	}
+	rInPx := rIn * float64(w)
+	rOutPx := rOut * float64(w)
+	at := rgbSampler(img)
+
+	hits := 0
+	for _, want := range d.Positions {
+		px := want[0] * float64(w)
+		py := want[1] * float64(h)
+		var inL, inS, ringL float64
+		var inN, ringN int
+		x0 := int(px - rOutPx - 1)
+		x1 := int(px + rOutPx + 1)
+		y0 := int(py - rOutPx - 1)
+		y1 := int(py + rOutPx + 1)
+		for y := y0; y <= y1; y++ {
+			for x := x0; x <= x1; x++ {
+				if x < b.Min.X || y < b.Min.Y || x >= b.Max.X || y >= b.Max.Y {
+					continue
+				}
+				dx := float64(x) - px
+				dy := float64(y) - py
+				dist := math.Sqrt(dx*dx + dy*dy)
+				r, g, bb := at(x, y)
+				l := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(bb)
+				s := float64(max3(r, g, bb) - min3(r, g, bb))
+				switch {
+				case dist <= rInPx:
+					inL += l
+					inS += s
+					inN++
+				case dist >= rInPx*1.35 && dist <= rOutPx:
+					ringL += l
+					ringN++
+				}
+			}
+		}
+		if inN == 0 || ringN == 0 {
+			continue
+		}
+		inL /= float64(inN)
+		inS /= float64(inN)
+		ringL /= float64(ringN)
+		if inL-ringL >= contrastMin && inS <= float64(satMax) && inL >= float64(bright) {
+			hits++
 		}
 	}
 	return hits >= minHits

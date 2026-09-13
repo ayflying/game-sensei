@@ -94,11 +94,19 @@ def load_demos(data_dir: Path, recursive: bool) -> list[dict]:
 
 
 def map_action(s: dict) -> tuple[str | None, float, float]:
-    """把 trajectory.jsonl 的一行映射到 (类别, tap_x, tap_y)。"""
+    """把 trajectory.jsonl 的一行映射到 (类别, tap_x, tap_y)。
+
+    ⚠️ 这里认的是**原始轨迹 kind**（move/key/joy/press...），不是目标类别
+    （up/press），按直觉输出会静默丢样本。kind 的取值由 Go 侧
+    internal/dataset.KindName 决定，加新动作类型时要两边一起改。
+    """
     kind = s.get("kind", "")
     if kind in ("tap", "hold"):
         return "tap", float(s.get("nx", 0.5)), float(s.get("ny", 0.5))
-    if kind == "key":
+    if kind in ("key", "press"):
+        # key = 系统键；press = 按「命名按钮」（游戏档案里的按钮/宏）。
+        # 两者都落进学生的 press 类——学生头目前只输出「按一下」这个意图，
+        # 不表达按的是哪个按钮（按钮名在字段 action 里，将来扩按钮头时再收回）。
         return "press", 0.0, 0.0
     if kind == "joy":
         dx = float(s.get("nx2", 0.5)) - float(s.get("nx", 0.5))
