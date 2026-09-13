@@ -70,6 +70,19 @@ type Config struct {
 	// DemoColor 是否同时保存老师看到的彩色帧（便于人工复核，占空间）。
 	DemoColor bool
 
+	// Sweep 启用「脚本化方向扫掠」采集（与 Demo 互斥，且**不调用老师模型**）。
+	//
+	// 动机（2026-09-13 实测）：要让学生的方向类学得起来，需要**每个方向都有样本**。
+	// 靠老师自由发挥拿不到这个性质——实测 35 条移动示范里 34 条是同一个方向的组合，
+	// 12 个类别里 7 个 0 样本。脚本化扫掠按固定顺序轮流推八向，标签是**确定性真值**
+	// （我们自己发的动作），覆盖天然均衡，且零推理成本。
+	Sweep bool
+	// SweepRounds 扫掠轮数（一轮 = 走完 AllDirs 的 8 个方向）。
+	SweepRounds int
+	// SweepHoldMs 每个方向的推杆时长（毫秒）。太长会让角色跑出画面/撞墙，
+	// 太短则位移不可观测；1200ms 与真人示范的量级一致。
+	SweepHoldMs int
+
 	// ---- 游戏档案（internal/game） ----
 	//
 	// Game 指定当前要玩的游戏档案：档案名（如 nrc、pc_generic）或 JSON 路径。
@@ -137,6 +150,10 @@ func Default() Config {
 		DemoWait:  2 * time.Second,
 		DemoOut:   "",
 		DemoColor: false,
+
+		Sweep:       false,
+		SweepRounds: 5,
+		SweepHoldMs: 1200,
 
 		Game: "",
 

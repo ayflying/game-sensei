@@ -25,7 +25,7 @@ func fakeNet(t *testing.T) *Net {
 	n.conv2W, n.conv2B = ones(16*8*9), ones(16)
 	n.conv3W, n.conv3B = ones(24*16*9), ones(24)
 	n.fcW, n.fcB = ones(64*24), zeros(64)
-	n.clsW, n.clsB = ones(8*64), zeros(8)
+	n.clsW, n.clsB = ones(len(Classes)*64), zeros(len(Classes))
 	n.coordW, n.coordB = ones(2*64), zeros(2)
 	return n
 }
@@ -37,8 +37,8 @@ func TestForward尺寸衔接(t *testing.T) {
 		x[i] = 0.5
 	}
 	logits, coords := n.forward(x)
-	if len(logits) != 8 {
-		t.Fatalf("logits=%d, 期望 8", len(logits))
+	if len(logits) != len(Classes) {
+		t.Fatalf("logits=%d, 期望 %d（len(Classes)）", len(logits), len(Classes))
 	}
 	if len(coords) != 2 {
 		t.Fatalf("coords=%d, 期望 2", len(coords))
