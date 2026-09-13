@@ -16,8 +16,8 @@
 |---|---|---|---|---|---|
 | **T0** | 补 `-print-protocol` 协议打印入口 | `cmd/helper/main.go` | ≈15 行 | 无 | 直接跑，看输出 |
 | **T1** | 给 `ActionProtocol` 加 hints 防护 | `internal/agent/parse.go` | 2 行 + 注释 | T0（验收） | 单测 + 真机一段 |
-| **T2** | hints 按界面态分层 | `internal/game/profile.go`、`resolve.go`、`profiles/nrc.json` | ≈40 行 + 档案迁移 | T0 | `-print-protocol` 对基线数字 |
-| **T3** | 容量门禁 + hints 瘦身 | `internal/game/profile.go`、`profiles/nrc.json` | ≈30 行 | T2 | 单测（超限报错） |
+| **T2** | hints 按界面态分层 | `internal/game/profile.go`、`resolve.go`、**两份** `nrc.json`（见 T2.4） | ≈40 行 + 档案迁移 | T0 | `-print-protocol` 对基线数字 |
+| **T3** | 容量门禁 + hints 瘦身 | `internal/game/profile.go`、两份 `nrc.json` | ≈30 行 | T2 | 单测（超限报错） |
 
 ### 0.2 执行顺序与理由
 
@@ -58,7 +58,7 @@ profile.json 的 hints[]  →  internal/game/resolve.go:223  →  agent.Protocol
   →  agent.ActionProtocol()（internal/agent/parse.go:457）拼进提示词  →  Ollama 老师
 ```
 
-另有一条临时通路：`helper -demo-hints "a;b"`（`cmd/helper/main.go:156` 定义，`internal/teacher/demonstrator.go:121-126` 合并），用于现场补先验。
+另有一条临时通路：`helper -demo-hints "a;b"`（`cmd/helper/main.go:166` 定义，`internal/teacher/demonstrator.go:121-126` 合并），用于现场补先验。
 
 **当前盘点的 hints 规模**（实测读取三个档案）：
 
@@ -72,6 +72,9 @@ profile.json 的 hints[]  →  internal/game/resolve.go:223  →  agent.Protocol
 > 工作区当前 11 条 / 729 字符）。**本任务不要碰这个文件**——它在 T2 里也不需要迁移（0 条战斗先验）。
 > 表内为工作区实测值，仅供理解规模。
 
+> ⚠️ `nrc` 有**两份同名档案**（`profiles/nrc.json` 与 `internal/game/profiles/nrc.json`），内容当前完全一致，
+> 任何 hints 改动都要**两份同步**——详见 T2.4。
+>
 > 分类口径：关键词粗筛（战斗侧命中 战斗/技能/捕捉/咕噜球/能量/逃跑/投球/回合/抓宠/出招/聚能/准星/球/瞄准/血；
 > 世界侧命中 摇杆/移动/传送/地图/坐骑/滑翔/游泳/任务追踪/大地图）。**粗筛仅用于定位候选，最终归属见 §四 T2.3 的逐条复核表**——
 > 其中 `idx[14]` 会被关键词误判成战斗，实际讲的是「在大世界直接抓、不必进战斗」，应归 world。
@@ -125,7 +128,7 @@ if len(o.Hints) > 0 {
 b.WriteString("\n【可用动作】每条一行，只输出一行：\n")   // ← 紧接着就是动作协议
 ```
 
-值得注意：`ActionProtocol` **已经吸收过同类教训**（`parse.go:445-456` 明确写了「占位符里绝不能出现
+值得注意：`ActionProtocol` **已经吸收过同类教训**（`internal/agent/parse.go:445-456` 明确写了「占位符里绝不能出现
 具体坐标数字」「不要把摇杆四坐标写进协议」），**唯独 hints 这一段没有防护**。
 
 **现存的具体风险点**（本意是防误解，但含动作动词）：
@@ -181,7 +184,7 @@ b.WriteString("\n【可用动作】每条一行，只输出一行：\n")   // �
 
 **为什么**：当前看不到最终协议，T1/T2/T3 全部无法验收（`ActionProtocol` 唯一消费点是 `internal/teacher/demonstrator.go:293`，只在 `-demo` 路径触发）。
 
-**改动 1**：`cmd/helper/main.go`，flag 定义区（建议紧跟 `planMode`，即 `:160` 之后）：
+**改动 1**：`cmd/helper/main.go`，flag 定义区（建议紧跟 `planMode`（`cmd/helper/main.go:169`）之后）：
 
 ```go
 	// ---- 档案自检：打印最终动作协议（不初始化后端、不截屏、不送审）----
@@ -189,7 +192,7 @@ b.WriteString("\n【可用动作】每条一行，只输出一行：\n")   // �
 		"打印该档案在 world/battle 两态下的完整动作协议（含界面先验）后退出。用于核验档案先验是否按态正确注入")
 ```
 
-**改动 2**：`cmd/helper/main.go:277`（`printProfile(p)` 之后、`openBackend` 之前）插入：
+**改动 2**：`cmd/helper/main.go:287`（`printProfile(p)` 之后、`openBackend`（`:297`）之前）插入：
 
 ```go
 		if *printProtocol {
@@ -377,8 +380,15 @@ func (p *Profile) HintsForState(state string) []string {
 
 #### T2.4 `nrc.json` 逐条迁移表（人工复核后的归属）
 
-打开 `profiles/nrc.json`，按 `hints` 数组下标对照下表搬到 `hints_world` / `hints_battle`，
-或保留在 `hints`。**T2 阶段：除 idx[12][13] 之外全部照搬，12/13 先放进 `hints_battle`，等 T3 再迁出**：
+⚠️ **这个仓库里有两份 `nrc.json`，内容当前完全相同（逐字节比对过），必须同步改**：
+
+- `profiles/nrc.json` —— **工作目录优先**，`Load("nrc")` 实际加载的就是这份；
+- `internal/game/profiles/nrc.json` —— 经 `go:embed` 内置，是找不到外部文件时的兜底。
+
+只改一份的后果：本地 `-game nrc` 用新档案、而分发后（无外部 `profiles/` 目录时）走内置旧档案，
+行为不一致且很难查。**两处的 `hints` 数组下标完全一致，照下表同步搬。**
+
+**T2 阶段：除 idx[12][13] 之外全部照搬，12/13 先放进 `hints_battle`，等 T3 再迁出。**
 
 | idx | 字符 | 建议归属 | 摘要（用于对号入座） |
 |---|---:|---|---|
@@ -602,7 +612,7 @@ func (p *Profile) normalizeHints() error {
 > 「合计超限」用例是 10 条 × 500 字 = 5000 > 4000。照上面的写法太啰嗦，执行时用
 > `strings.Join` + `strings.Repeat` 拼 JSON。⚠️ `internal/game/profile_test.go` 当前 import 块
 > **没有 `strings`**（只有 `os`/`path/filepath`/`testing`/`internal/agent`），需补上；
-> `decode` 是包内非导出函数，可直接调用，签名为 `decode(src string, data []byte) (*Profile, error)`（`profile.go:413`）。
+> `decode` 是包内非导出函数，可直接调用，签名为 `decode(src string, data []byte) (*Profile, error)`（`internal/game/profile.go:413`）。
 
 #### T3.3 A/B 验证流程（加 hint 的标准动作）
 
