@@ -58,28 +58,74 @@ func TestMacro_每个技能宏都以展开钮开头(t *testing.T) {
 		t.Fatal("档案应有 battle_energy 聚能钮")
 	}
 	for _, m := range p.Macros {
-		if m.Name == "cancel_aim" {
-			continue // 取消宏只点一次展开钮，不选卡
-		}
-		if m.Name == "gather_energy" {
-			// 聚能宏不碰技能盘：第一步必须点聚能钮（battle_energy）。
-			if len(m.Steps) == 0 {
-				t.Fatal("gather_energy 没有步骤")
-			}
-			first := m.Steps[0]
-			if !approx(first.Pos[0], energy.Pos[0]) || !approx(first.Pos[1], energy.Pos[1]) {
-				t.Errorf("gather_energy 第一步应点聚能钮 %v，实际 %v", energy.Pos, first.Pos)
-			}
-			continue
-		}
 		if len(m.Steps) == 0 {
 			t.Errorf("宏 %s 没有步骤", m.Name)
 			continue
 		}
 		first := m.Steps[0]
-		if !approx(first.Pos[0], skill.Pos[0]) || !approx(first.Pos[1], skill.Pos[1]) {
-			t.Errorf("宏 %s 第一步应点展开钮 %v，实际 %v", m.Name, skill.Pos, first.Pos)
+		switch m.Name {
+		case "cancel_aim":
+			// 取消宏只点一次展开钮，不选卡——但它仍要展开技能盘，走下面的通用检查。
+			if !approx(first.Pos[0], skill.Pos[0]) || !approx(first.Pos[1], skill.Pos[1]) {
+				t.Errorf("cancel_aim 第一步应点展开钮 %v，实际 %v", skill.Pos, first.Pos)
+			}
+		case "gather_energy":
+			// 聚能宏不碰技能盘：第一步必须点聚能钮（battle_energy）。
+			if !approx(first.Pos[0], energy.Pos[0]) || !approx(first.Pos[1], energy.Pos[1]) {
+				t.Errorf("gather_energy 第一步应点聚能钮 %v，实际 %v", energy.Pos, first.Pos)
+			}
+		case "flee_battle":
+			// 逃跑宏第一步点逃跑钮，第二步必须点确认弹窗（实测：只点逃跑钮不退出）。
+			if len(m.Steps) < 2 {
+				t.Fatalf("flee_battle 必须有 2 步（逃跑钮 + 确认弹窗），实际 %d 步", len(m.Steps))
+			}
+		default:
+			// 技能宏（cast_*）必须先从展开钮开始，否则后面点卡全是空的。
+			if !approx(first.Pos[0], skill.Pos[0]) || !approx(first.Pos[1], skill.Pos[1]) {
+				t.Errorf("宏 %s 第一步应点展开钮 %v，实际 %v", m.Name, skill.Pos, first.Pos)
+			}
 		}
+	}
+}
+
+// TestFleeMacro_含二次确认 守卫一条真机实测出来的机制：
+// 逃跑不是「点一下逃跑钮」，而是「点逃跑钮 → 弹确认框 → 点『是』」。
+// 少了第二步，战斗里按逃跑会停在弹窗上，表现为「逃不掉」。
+func TestFleeMacro_含二次确认(t *testing.T) {
+	p, err := Load("nrc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flee *Macro
+	for i := range p.Macros {
+		if p.Macros[i].Name == "flee_battle" {
+			flee = &p.Macros[i]
+		}
+	}
+	if flee == nil {
+		t.Fatal("档案缺少 flee_battle 宏——战斗态需要它才能被确定性脱身")
+	}
+	if flee.State != "battle" {
+		t.Errorf("flee_battle 的 state 应为 battle，实际 %q", flee.State)
+	}
+
+	// 第一步必须落在逃跑钮上
+	fb, ok := p.Button("battle_flee")
+	if !ok {
+		t.Fatal("档案应有 battle_flee 逃跑钮")
+	}
+	if !approx(flee.Steps[0].Pos[0], fb.Pos[0]) || !approx(flee.Steps[0].Pos[1], fb.Pos[1]) {
+		t.Errorf("flee_battle 第一步应点逃跑钮 %v，实际 %v", fb.Pos, flee.Steps[0].Pos)
+	}
+
+	// 第二步必须与第一步是**不同**位置（否则等于连点两次逃跑钮，不会确认）
+	second := flee.Steps[1]
+	if approx(second.Pos[0], fb.Pos[0]) && approx(second.Pos[1], fb.Pos[1]) {
+		t.Error("flee_battle 第二步与逃跑钮同位置——确认弹窗没被点到，逃跑不会生效")
+	}
+	// 确认框在屏幕中下部；用一个宽松的范围挡住「把确认坐标填到屏幕角落」这类笔误
+	if second.Pos[1] < 0.5 || second.Pos[1] > 0.95 {
+		t.Errorf("flee_battle 确认按钮的 y=%v 不在中下部（0.5~0.95），疑似坐标填错", second.Pos[1])
 	}
 }
 

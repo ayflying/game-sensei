@@ -26,8 +26,17 @@ import (
 	"os"
 )
 
-// Classes 与 trainer/train.py 的 CLS 一一对应。
-var Classes = []string{"up", "down", "left", "right", "tap", "press", "wait", "none"}
+// Classes 与 trainer/train.py 的 CLS 一一对应（索引即标签，顺序不可改）。
+//
+// 方向类取 8 向，与 agent.AllDirs 同集合——L1 动作空间是 8 向，学生头若只留
+// 4 向就无法表达老师实际发出的斜向移动（实测 nrc 真机示范的移动全是斜向），
+// 只能把 up_right/up_left 硬塞进 up，等于系统性错标。
+// 顺序漂移会让权重标签错位且**不会报错**，故 Load 会校验 arch.classes。
+var Classes = []string{
+	"up", "down", "left", "right",
+	"up_left", "up_right", "down_left", "down_right",
+	"tap", "press", "wait", "none",
+}
 
 // InW/InH 是网络输入尺寸（与 train.py 的 center_crop_resize 目标一致）。
 const (
@@ -60,7 +69,7 @@ type Net struct {
 	conv3B []float32
 	fcW    []float32 // [hidden,24]
 	fcB    []float32
-	clsW   []float32 // [8,hidden]
+	clsW   []float32 // [len(Classes),hidden]
 	clsB   []float32
 	coordW []float32 // [2,hidden]
 	coordB []float32
@@ -86,6 +95,9 @@ func Load(path string) (*Net, error) {
 	if f.Version != 1 {
 		return nil, fmt.Errorf("不支持的权重版本: %d", f.Version)
 	}
+	if err := validateClasses(f.Arch.Classes); err != nil {
+		return nil, err
+	}
 	w := f.Weights
 	n := &Net{hidden: f.Arch.Hidden}
 	n.meta.valAcc = f.Meta.ValAcc
@@ -94,7 +106,7 @@ func Load(path string) (*Net, error) {
 		"conv2_w": 16 * 8 * 9, "conv2_b": 16,
 		"conv3_w": 24 * 16 * 9, "conv3_b": 24,
 		"fc_w": f.Arch.Hidden * 24, "fc_b": f.Arch.Hidden,
-		"cls_w": 8 * f.Arch.Hidden, "cls_b": 8,
+		"cls_w": len(Classes) * f.Arch.Hidden, "cls_b": len(Classes),
 		"coord_w": 2 * f.Arch.Hidden, "coord_b": 2,
 	}
 	for k, sz := range need {
@@ -109,6 +121,51 @@ func Load(path string) (*Net, error) {
 	n.clsW, n.clsB = w["cls_w"], w["cls_b"]
 	n.coordW, n.coordB = w["coord_w"], w["coord_b"]
 	return n, nil
+}
+
+// validateClasses 校验权重声明的类别与运行时规范逐项一致。
+//
+// 为什么必须逐项（而不是只看集合）：logits 是按**下标**取 Classes 的，
+// 顺序不同就会把「预测出的 up」当成「down」执行——模型照跑不误，
+// 只是动作全错。这是「不报错但决策全错」，只能在加载期挡掉。
+//
+// 旧格式（4 向头）权重会落进「缺少类别」分支：这里特意把缺失项列出来，
+// 因为它们的失败原因不是坏文件，而是**结构上无法表达斜向移动**。
+func validateClasses(got []string) error {
+	if len(got) == 0 {
+		return fmt.Errorf("权重未声明类别（arch.classes 为空）")
+	}
+	known := map[string]bool{}
+	for _, c := range Classes {
+		known[c] = true
+	}
+	seen := map[string]bool{}
+	for _, c := range got {
+		if seen[c] {
+			return fmt.Errorf("权重类别重复: %q", c)
+		}
+		seen[c] = true
+		if !known[c] {
+			return fmt.Errorf("权重含运行时无法识别的类别 %q（权重与代码版本不匹配）", c)
+		}
+	}
+	if len(got) != len(Classes) {
+		var missing []string
+		for _, c := range Classes {
+			if !seen[c] {
+				missing = append(missing, c)
+			}
+		}
+		return fmt.Errorf("权重只声明了 %d/%d 个类别，缺少 %v —— "+
+			"这类权重（多为 4 向旧格式）无法表达 L1 的斜向移动，请用当前 trainer 重新训练",
+			len(got), len(Classes), missing)
+	}
+	for i, c := range Classes {
+		if got[i] != c {
+			return fmt.Errorf("权重类别顺序与运行时不一致: [%d] %q != %q（拒绝加载）", i, got[i], c)
+		}
+	}
+	return nil
 }
 
 // Meta 返回训练时的验证准确率（用于日志展示）。
@@ -187,9 +244,9 @@ func (n *Net) forward(x []float32) (logits, coords []float32) {
 		}
 	}
 
-	// cls head
-	logits = make([]float32, 8)
-	for o := 0; o < 8; o++ {
+	// cls head（类别数由 Classes 决定，不写字面量——避免改类别时漏改这里）
+	logits = make([]float32, len(Classes))
+	for o := 0; o < len(Classes); o++ {
 		var s float32
 		row := n.clsW[o*n.hidden : o*n.hidden+n.hidden]
 		for i := 0; i < n.hidden; i++ {

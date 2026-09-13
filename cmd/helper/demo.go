@@ -153,6 +153,13 @@ func runTapScript(be backend, prefix string, steps []game.MacroStep, defWait tim
 	return false, true
 }
 
+// fleeMacroName 是档案里「从回合战斗脱身」的宏名。
+//
+// 约定这个固定名字，是为了让「战斗卡死自愈」不再依赖单个按钮坐标：
+// 逃跑在实测中是两步（按钮 + 二次确认弹窗），把它固化在档案的宏里，
+// 换游戏时只改档案不改代码；档案没定义就退回单点逃跑钮。
+const fleeMacroName = "flee_battle"
+
 // escapeToScript 把脱困步骤转成统一脚本步骤（两种步骤字段同形）。
 func escapeToScript(in []game.EscapeStep) []game.MacroStep {
 	out := make([]game.MacroStep, 0, len(in))
@@ -538,24 +545,51 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 		//     不加冷却会在脱困失败时每步都来一次，把示范回路刷成脱困演示。
 		stuck := stuckStreak >= stuckStreakLimit && step-lastEscapeStep >= prof.EscapeCooldown()
 
-		// —— 战斗态卡死：不推摇杆，优先逃跑脱离 ——
+		// —— 战斗态卡死：不推摇杆，优先用「逃跑宏」脱离 ——
+		//
+		// 为什么是宏而不是单点逃跑钮：2026-09-13 真机实测发现逃跑有**二次确认弹窗**
+		// （「是否要退出本次战斗？」否/是）。只按 battle_flee 会停在弹窗上，现象是
+		// 「按了逃跑却还在战斗里」，下一步 Δ 依旧很小 → 反复触发脱困，
+		// 把整个示范回路耗在弹窗上（实测 40 步里 25 步卡在这里，方向数据全废）。
+		// 档案里的 flee_battle 宏把「点逃跑钮 + 点确认」打包成一个动作，跑一次真能出来。
+		// 档案没定义该宏时退回单点，保持旧行为——不因缺宏就彻底失去脱困能力。
 		if stuck && inBattle {
 			escapeAttempt++
 			n := stuckStreak
 			lastEscapeStep = step
 			stuckStreak = 0
-			if _, hasFlee := prof.Button("battle_flee"); hasFlee {
-				msg := fmt.Sprintf("战斗中 %d 个窗口画面没推进（窗口Δ%.1f）→ 点逃跑脱离", n, windowDiff)
+			fledViaMacro := false
+			if m, isMacro := prof.Macro(fleeMacroName); isMacro {
+				msg := fmt.Sprintf("战斗中 %d 个窗口画面没推进（窗口Δ%.1f）→ 执行 %s 宏（含二次确认）",
+					n, windowDiff, fleeMacroName)
 				fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
 				logHook(msg)
-				if err := be.Apply(agent.Action{Kind: agent.ActionPress, Name: "battle_flee"}); err != nil {
-					fmt.Printf("[%s] %s 战斗逃跑失败: %v\n", progress(step, steps), escapeLogTag, err)
-					logHook(fmt.Sprintf("战斗逃跑失败: %v", err))
+				aborted, ranOK := runTapScript(be, "宏 "+m.Name, m.Steps, cfg.DemoWait,
+					stop, escapeLogTag, logHook)
+				if aborted {
+					return finishDemo(w, &closed, parsedOK, applied)
 				}
-			} else {
-				msg := fmt.Sprintf("战斗中 %d 个窗口画面没推进且无逃跑钮 → 等待一个回合", n)
-				fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
-				logHook(msg)
+				if !ranOK {
+					fmt.Printf("[%s] %s 逃跑宏执行失败\n", progress(step, steps), escapeLogTag)
+					logHook("逃跑宏执行失败")
+				}
+				fledViaMacro = true
+			}
+			if !fledViaMacro {
+				if _, hasFlee := prof.Button("battle_flee"); hasFlee {
+					msg := fmt.Sprintf("战斗中 %d 个窗口画面没推进（窗口Δ%.1f）→ 点逃跑脱离"+
+						"（档案未定义 %s 宏，可能停在二次确认弹窗）", n, windowDiff, fleeMacroName)
+					fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+					logHook(msg)
+					if err := be.Apply(agent.Action{Kind: agent.ActionPress, Name: "battle_flee"}); err != nil {
+						fmt.Printf("[%s] %s 战斗逃跑失败: %v\n", progress(step, steps), escapeLogTag, err)
+						logHook(fmt.Sprintf("战斗逃跑失败: %v", err))
+					}
+				} else {
+					msg := fmt.Sprintf("战斗中 %d 个窗口画面没推进且无逃跑钮 → 等待一个回合", n)
+					fmt.Printf("[%s] %s %s\n", progress(step, steps), escapeLogTag, msg)
+					logHook(msg)
+				}
 			}
 			select {
 			case <-stop:
@@ -924,6 +958,179 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 		case <-time.After(cfg.DemoWait):
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 脚本化方向扫掠（-sweep）
+// ---------------------------------------------------------------------------
+
+// SweepStep 返回扫掠第 i 步（0 基）应当执行的方向动作与方向名。
+//
+// 按 AllDirs 的顺序循环，**不调用老师模型**：动作是我们自己发的，因此标签是
+// 确定性真值，方向覆盖天然均衡。这正是「老师自由发挥」拿不到的性质——
+// 实测老师会在 up_left/right 之间横跳，12 类里有 7 类 0 样本。
+//
+// 纯函数，便于测试穷举（见 sweep_test.go）。
+func SweepStep(i, holdMs int) (agent.Action, string) {
+	d := agent.AllDirs[i%len(agent.AllDirs)]
+	act := agent.Action{Kind: agent.ActionMove, Dir: d}
+	if holdMs > 0 {
+		act.Dur = time.Duration(holdMs) * time.Millisecond
+	}
+	return act, string(d)
+}
+
+// runSweep 执行脚本化八向扫掠采集。
+//
+// 与 runDemo 的关键差异：
+//   - 不调用老师（零推理成本、零等待），动作序列由 SweepStep 决定；
+//   - 每步都落样（老师示范会因解析失败/重复而不落样）；
+//   - 遇战斗**不落样**，直接跑档案的逃跑宏脱身（战斗里推摇杆是空操作，
+//     落进去只会得到「标签是移动、画面是静止」的污染样本）。
+func runSweep(cfg config.Config, be backend, prof *game.Profile, stop <-chan os.Signal,
+	logHook func(string)) error {
+	sw, sh, err := be.Size()
+	if err != nil {
+		return fmt.Errorf("获取屏幕尺寸失败: %w", err)
+	}
+
+	dir := cfg.DemoOut
+	if dir == "" {
+		dir = filepath.Join(".workbuddy", "demos", time.Now().Format("20060102-150405"))
+	}
+	rounds := cfg.SweepRounds
+	if rounds <= 0 {
+		rounds = 1
+	}
+	total := rounds * len(agent.AllDirs)
+
+	w, err := dataset.NewWriter(dir, dataset.Meta{
+		Goal:      fmt.Sprintf("脚本化八向扫掠 %d 轮（确定性真值标签，不调用老师）", rounds),
+		Model:     "sweep(no-teacher)",
+		Backend:   be.Describe(),
+		ScreenW:   sw,
+		ScreenH:   sh,
+		DownWidth: cfg.DownsampleWidth,
+		DemoWidth: cfg.DemoWidth,
+		Live:      be.Live(),
+	})
+	if err != nil {
+		return err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = w.Close()
+		}
+	}()
+
+	fmt.Printf("方向扫掠: %s | %d 轮 × %d 向 = %d 步 | 每向 %dms\n",
+		w.Dir(), rounds, len(agent.AllDirs), total, cfg.SweepHoldMs)
+	if cfg.DemoColor {
+		fmt.Println("同时保存彩色帧到 color/（用于人工复核）")
+	}
+	fmt.Println()
+
+	var parsedOK, applied int
+	inBattle, nonBattleStreak := false, 0
+
+	for step := 1; step <= total; step++ {
+		// 1) 抓帧：灰度帧落样给学生，彩色帧用于战斗判定与留档。
+		gray, err := be.Grab(cfg.DownsampleWidth)
+		if err != nil {
+			return fmt.Errorf("第 %d 步抓帧失败: %w", step, err)
+		}
+		// 黑帧（息屏）不落样：screencap 全黑 + input 被吞，落进去只会污染数据。
+		if imageMeanGray(gray) < blackFrameMean {
+			fmt.Printf("[%s/%d] ⚫ 画面全黑（疑似息屏），本步跳过不落样\n", progress(step, total), total)
+			logHook("画面全黑，跳过本步")
+			select {
+			case <-stop:
+				return finishDemo(w, &closed, parsedOK, applied)
+			case <-time.After(cfg.DemoWait):
+			}
+			continue
+		}
+		color, cErr := be.GrabColor()
+		if cErr != nil {
+			return fmt.Errorf("第 %d 步抓彩色帧失败: %w", step, cErr)
+		}
+
+		// 2) 战斗态：不落样，直接逃跑宏脱身。
+		detected := prof.IsBattle(color)
+		inBattle, nonBattleStreak = battleStateStep(inBattle, detected, nonBattleStreak)
+		if inBattle {
+			if m, isMacro := prof.Macro(fleeMacroName); isMacro {
+				msg := fmt.Sprintf("战斗态 → 执行 %s 宏脱身（本步不落样）", fleeMacroName)
+				fmt.Printf("[%s/%d] %s %s\n", progress(step, total), total, escapeLogTag, msg)
+				logHook(msg)
+				aborted, ok := runTapScript(be, "宏 "+m.Name, m.Steps, cfg.DemoWait,
+					stop, escapeLogTag, logHook)
+				if aborted {
+					return finishDemo(w, &closed, parsedOK, applied)
+				}
+				if !ok {
+					logHook("逃跑宏执行失败")
+				}
+			} else if _, hasFlee := prof.Button("battle_flee"); hasFlee {
+				fmt.Printf("[%s/%d] %s 战斗态 → 单点逃跑钮（档案未定义 %s 宏）\n",
+					progress(step, total), total, escapeLogTag, fleeMacroName)
+				logHook("战斗态且档案无 " + fleeMacroName + " 宏，退回单点逃跑钮")
+				if err := be.Apply(agent.Action{Kind: agent.ActionPress, Name: "battle_flee"}); err != nil {
+					logHook(fmt.Sprintf("战斗逃跑失败: %v", err))
+				}
+			} else {
+				logHook("战斗态且无逃跑手段，跳过本步")
+			}
+			inBattle, nonBattleStreak = false, 0
+			select {
+			case <-stop:
+				return finishDemo(w, &closed, parsedOK, applied)
+			case <-time.After(cfg.DemoWait):
+			}
+			continue
+		}
+
+		// 3) 执行扫掠方向
+		act, dirName := SweepStep(step-1, cfg.SweepHoldMs)
+		jpg, encErr := vision.EncodeJPEG(vision.Downscale(color, cfg.DemoWidth), 88)
+		if encErr != nil {
+			return fmt.Errorf("第 %d 步编码彩色帧失败: %w", step, encErr)
+		}
+		expanded, expErr := be.Resolve(act)
+		if applyErr := be.Apply(act); applyErr != nil {
+			fmt.Printf("[%s/%d] ⚠️  扫掠动作执行失败: %v\n", progress(step, total), total, applyErr)
+			logHook(fmt.Sprintf("扫掠动作执行失败: %v", applyErr))
+		} else {
+			applied++
+		}
+		desc := act.String()
+		if expErr == nil {
+			desc = fmt.Sprintf("%s → %s", act.String(), expanded.String())
+		}
+		line := fmt.Sprintf("[%s/%d] 🔄 扫掠 %-9s %s | %s",
+			progress(step, total), total, dirName, desc, agent.ExplainAction(act))
+		fmt.Println(line)
+		logHook(line)
+
+		// 4) 落样（标签即 dirName，确定性真值）
+		info := dataset.StepInfo{
+			Raw:    fmt.Sprintf("SWEEP %s", act.String()),
+			Parsed: true,
+		}
+		if err := w.Step(act, info, encodeGrayPNG(gray), jpg, cfg.DemoColor); err != nil {
+			return fmt.Errorf("第 %d 步写示范数据失败: %w", step, err)
+		}
+		parsedOK++
+
+		// 5) 等游戏响应
+		select {
+		case <-stop:
+			return finishDemo(w, &closed, parsedOK, applied)
+		case <-time.After(cfg.DemoWait):
+		}
+	}
+	return finishDemo(w, &closed, parsedOK, applied)
 }
 
 // askTeacher 包一层超时；保持 runDemo 主循环干净。

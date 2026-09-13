@@ -10,7 +10,7 @@ internal/student 纯 Go 前向传播加载——零 CGO、零外部依赖。
   - 权重文件是唯一接口，Python 侧导出顺序与 Go 侧加载顺序一一对应。
 
 学生输出两层（与 L1 动作空间对齐，跨游戏通用）：
-  - 分类头：8 类 = up/down/left/right/tap/press/wait/none
+  - 分类头：12 类 = 8 向（与 internal/agent.AllDirs 同序）+ tap/press/wait/none
   - 回归头：tap 的归一化坐标 (x, y)
 
 用法：
@@ -35,24 +35,46 @@ import argparse
 import json
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
-CLS = ["up", "down", "left", "right", "tap", "press", "wait", "none"]
+# 类别顺序必须与 Go 侧 internal/student.Classes 逐项一致（索引即标签）。
+#
+# 为什么是 8 向而不是 4 向：L1 动作空间本来就是 8 向（internal/agent.AllDirs），
+# 老师用的大模型天然输出 8 向（实测 nrc 真机示范 35 条移动**全是斜向**：
+# up_right 11 / down_right 23 / up_left 1，没有一条正向前后左右）。
+# 学生头若只留 4 向，这些斜向示范就只能被硬塞进 up/down，
+# 等于用**错标的样本**训练——模型学不会方向，而且全程不报错。
+CLS = [
+    "up", "down", "left", "right",
+    "up_left", "up_right", "down_left", "down_right",
+    "tap", "press", "wait", "none",
+]
 
-# 类别权重：老师示范里 none/wait 常占大头，不加权学生会学会「永远不动」
-CLASS_WEIGHTS = np.array([0.3, 0.3, 0.3, 0.3, 1.5, 1.5, 0.5, 0.5], dtype=np.float32)
+# 方向名集合（与 internal/agent.AllDirs 同集合；顺序见 CLS）。
+DIRS = tuple(CLS[:8])
+
+# 类别权重：老师示范里 none/wait 常占大头，不加权学生会学会「永远不动」。
+# 权重只对**出现过的类**起作用；缺失类会被 --allow-missing-classes 显式点名。
+CLASS_WEIGHTS = np.array([0.3] * 8 + [1.5, 1.5, 0.5, 0.5], dtype=np.float32)
+assert len(CLASS_WEIGHTS) == len(CLS), "CLASS_WEIGHTS 长度必须与 CLS 一致"
 
 
 # ---------------------------------------------------------------------------
 # 数据：读取 demo 数据集
 # ---------------------------------------------------------------------------
 
-def load_demos(data_dir: Path, recursive: bool) -> list[dict]:
-    """读一个或多个示范目录，返回样本列表。
+def load_demos(data_dir: Path, recursive: bool) -> tuple[list[dict], dict]:
+    """读一个或多个示范目录，返回 (样本列表, 普查统计)。
 
     每个样本 = {"frame": float32[down_h,down_w] 0~1, "cls": int, "x": float, "y": float}
+
+    另返回 stats 供**类别普查**使用（见 main 的空类检查）：
+      - raw_kinds: 原始 kind 计数（none/move/press...）
+      - mapped:    映射到的学生类计数
+      - dropped:   map_action 返回 None 而丢掉的条数（按 kind 计）
     """
     from PIL import Image
 
@@ -65,6 +87,9 @@ def load_demos(data_dir: Path, recursive: bool) -> list[dict]:
         sys.exit(f"在 {data_dir} 没找到 trajectory.jsonl")
 
     samples: list[dict] = []
+    raw_kinds: Counter = Counter()
+    mapped: Counter = Counter()
+    dropped: Counter = Counter()
     for tj in tjs:
         root = tj.parent
         n_ok = 0
@@ -76,21 +101,46 @@ def load_demos(data_dir: Path, recursive: bool) -> list[dict]:
                 s = json.loads(line)
                 if not s.get("parsed", False):
                     continue  # 老师的废输出不是可模仿行为
+                raw_kinds[str(s.get("kind", ""))] += 1
                 frame_path = root / s["frame_gray"]
                 if not frame_path.exists():
                     continue
                 kind, x, y = map_action(s)
                 if kind is None:
+                    dropped[str(s.get("kind", ""))] += 1
                     continue
                 img = Image.open(frame_path).convert("L")
                 arr = center_crop_resize(img, 64, 48)
                 samples.append({"frame": arr, "cls": CLS.index(kind), "x": x, "y": y})
+                mapped[kind] += 1
                 n_ok += 1
         print(f"  {tj.parent.name}: {n_ok} 个有效样本")
     print(f"共加载 {len(samples)} 个样本")
     if len(samples) < 20:
         sys.exit("样本太少，先采集更多示范（-demo-steps 建议 60+）")
-    return samples
+    return samples, {"raw_kinds": raw_kinds, "mapped": mapped, "dropped": dropped}
+
+
+def parse_dir(s: str) -> str | None:
+    """把方向写法归一化成 DIRS 之一；无法识别返回 None。
+
+    与 Go 侧 internal/agent.ParseDir 的**语义**对齐（大小写不敏感，
+    `-`/空格/`/` 当作 `_`）。
+
+    ⚠️ 刻意不做子串匹配。原实现是
+        for d in ("up","down","left","right"):
+            if d in raw: return d
+    于是 raw="ACTION MOVE dir=up_right" 会被 "up" 先命中 → up_right/up_left
+    被静默塞成 up。这不是「粗略但可用」，而是**把斜向示范错标成正向**：
+    方向相反的两条示范拿到同一个标签，学生永远学不会方向，且没有任何报错。
+    """
+    k = (s or "").strip().lower()
+    for ch in ("-", " ", "\t", "/"):
+        k = k.replace(ch, "_")
+    while "__" in k:
+        k = k.replace("__", "_")
+    k = k.strip("_")
+    return k if k in DIRS else None
 
 
 def map_action(s: dict) -> tuple[str | None, float, float]:
@@ -106,17 +156,26 @@ def map_action(s: dict) -> tuple[str | None, float, float]:
     if kind in ("key", "press"):
         # key = 系统键；press = 按「命名按钮」（游戏档案里的按钮/宏）。
         # 两者都落进学生的 press 类——学生头目前只输出「按一下」这个意图，
-        # 不表达按的是哪个按钮（按钮名在字段 action 里，将来扩按钮头时再收回）。
+        # 不表达按的是哪个按钮（按钮名在字段 action 里）。
+        # ⚠️ 已知天花板：cmd/helper/student.go 的适配层把 press 一律翻译成
+        # 「按档案第一个按钮」，所以老师的战斗宏（聚能/赫突/逃跑）即便被学生
+        # 学会了「此刻该按」，也按不对按钮。要真正复现战斗策略，得给学生加一个
+        # 「按钮头」（对档案 Buttons 做多分类）——那是下一版的事，不是数据问题。
         return "press", 0.0, 0.0
     if kind == "joy":
         dx = float(s.get("nx2", 0.5)) - float(s.get("nx", 0.5))
         dy = float(s.get("ny2", 0.5)) - float(s.get("ny", 0.5))
         return dir_of(dx, dy), 0.0, 0.0
     if kind == "move":
-        raw = s.get("raw", "")
-        for d in ("up", "down", "left", "right"):
-            if d in raw:
-                return d, 0.0, 0.0
+        # 方向来自结构化字段 action（"move:up_right/1200ms"）或
+        # raw（"ACTION MOVE dir=up_right dur=1200"）。两条都按 token 扫，
+        # 不靠子串命中——理由见 parse_dir 的注释。
+        for src in (s.get("action", ""), s.get("raw", "")):
+            text = str(src).replace("=", " ").replace(":", " ").replace("/", " ")
+            for tok in text.split():
+                d = parse_dir(tok)
+                if d:
+                    return d, 0.0, 0.0
         return None, 0.0, 0.0
     if kind == "swipe":
         # 学生头暂无 swipe 类：拖拽平移示范降级成 wait，不模仿成「点起点」
@@ -135,9 +194,20 @@ def map_action(s: dict) -> tuple[str | None, float, float]:
 
 
 def dir_of(dx: float, dy: float) -> str:
-    if abs(dx) >= abs(dy):
-        return "right" if dx > 0 else "left"
-    return "down" if dy > 0 else "up"
+    """摇杆位移 → 8 向之一（与 CLS 的方向集合一致）。
+
+    斜向判据：两个分量同量级（小的 ≥ 大的 40%）才算斜向——
+    推杆时的天然抖动不该把「向前」判成「右前」。
+    """
+    ax, ay = abs(dx), abs(dy)
+    if ax == 0 and ay == 0:
+        return "up"  # 零位移：摇杆示范里不存在，退化为最保守的前
+    diag = min(ax, ay) >= 0.4 * max(ax, ay)
+    v = "up" if dy < 0 else "down"
+    h = "right" if dx > 0 else "left"
+    if diag:
+        return f"{v}_{h}"
+    return h if ax > ay else v
 
 
 def center_crop_resize(img, w: int, h: int) -> np.ndarray:
@@ -287,6 +357,94 @@ def git_short_commit() -> str:
 
 
 # ---------------------------------------------------------------------------
+# 类别普查与切分（防「静默白干」）
+# ---------------------------------------------------------------------------
+
+def print_census(stats: dict, label_counts: list[int]) -> None:
+    """打印原始 kind → 学生类的映射结果与每类样本数。
+
+    这一步存在的理由：训练器最危险的失败不是报错，而是**不报错**。
+    已经踩过两次（战斗按钮被记成 kind=none、斜向被塞成正向），都是
+    「跑完了、数字看着还行、但学到的是错的东西」。所以每次训练先把映射摊开。
+    """
+    print("\n== 类别普查 ==")
+    print(f"  原始 kind: {dict(stats['raw_kinds'].most_common())}")
+    if stats["dropped"]:
+        print(f"  ⚠️ 被丢弃（映射不到学生类）: {dict(stats['dropped'])}")
+    print(f"  {'类别':<12}{'样本':>6}")
+    for i, name in enumerate(CLS):
+        n = label_counts[i]
+        print(f"  {name:<12}{n:>6}{'   ❌ 空类' if n == 0 else ''}")
+
+
+def check_missing_classes(label_counts: list[int], allow: bool) -> list[str]:
+    """空类检查：CLS 里任何一类 0 样本，对应 head 就永远拿不到训练信号。
+
+    默认**直接退出**——「12 类里 7 类是空的」这种模型，val_acc 无论多高都
+    不能解释成能力，继续训只会产出一个看着能用的废模型。
+    确需先跑通链路时加 --allow-missing-classes，空类清单会如实写进 meta。
+    """
+    missing = [CLS[i] for i, n in enumerate(label_counts) if n == 0]
+    if not missing:
+        return []
+    msg = (f"以下 {len(missing)}/{len(CLS)} 个类别在本数据集里 0 样本，"
+           f"对应 head 不会得到任何训练信号:\n    {missing}\n"
+           f"  → 该模型不能作为能力交付。补采这些类的示范，或明确加 "
+           f"--allow-missing-classes 只求跑通链路（空类清单会写进 meta）。")
+    if not allow:
+        sys.exit(msg)
+    print("\n⚠️  " + msg.replace("\n", "\n  "))
+    return missing
+
+
+def stratified_split(label_ids: list[int], val_frac: float, seed: int
+                     ) -> tuple[list[int], list[int], list[str]]:
+    """按类别分层切分 train/val，返回 (train_idx, val_idx, 告警)。
+
+    为什么不能随机切：样本量小时随机切分很容易让某一类**整个落进训练集**
+    或**整个落进验证集**。后者让该类在 val 上必然算错（拉低数字且无从解释），
+    前者让 val 完全测不到该类。原实现还额外用 `max(4, ...)` 硬留 4 条 val，
+    在 59 样本时等于吃掉 7% 训练数据。
+
+    每类至少留 1 条在训练集；只有 1 条的类无法同时进两边，记入告警。
+    """
+    from collections import defaultdict
+    rng = np.random.RandomState(seed)
+    by_class: dict[int, list[int]] = defaultdict(list)
+    for i, c in enumerate(label_ids):
+        by_class[c].append(i)
+
+    tr: list[int] = []
+    va: list[int] = []
+    warn: list[str] = []
+    for c in sorted(by_class):
+        idxs = list(by_class[c])
+        rng.shuffle(idxs)
+        if len(idxs) == 1:
+            warn.append(f"{CLS[c]} 只有 1 个样本，只能进训练集，验证集测不到它")
+            tr += idxs
+            continue
+        n_v = max(1, min(int(round(len(idxs) * val_frac)), len(idxs) - 1))
+        va += idxs[:n_v]
+        tr += idxs[n_v:]
+    tr.sort()
+    va.sort()
+    return tr, va, warn
+
+
+def per_class_report(truth: list[int], pred: list[int]) -> tuple[dict, dict]:
+    """返回 (各类召回, 预测分布)——用来一眼看出 mode collapse。"""
+    from collections import Counter as _C
+    recall: dict[str, dict] = {}
+    for i, name in enumerate(CLS):
+        tot = sum(1 for t in truth if t == i)
+        if tot:
+            hit = sum(1 for t, p in zip(truth, pred) if t == i and p == i)
+            recall[name] = {"n": tot, "recall": round(hit / tot, 3)}
+    return recall, dict(_C(CLS[p] for p in pred))
+
+
+# ---------------------------------------------------------------------------
 # 训练主流程
 # ---------------------------------------------------------------------------
 
@@ -307,16 +465,32 @@ def main() -> None:
     ap.add_argument("--freeze-backbone", action="store_true",
                     help="冻结三层卷积、只训决策头（真机小样本加训防灾难性遗忘）")
     ap.add_argument("--note", default="", help="写入 meta.note 的标注（如标签质量说明）")
+    ap.add_argument("--allow-missing-classes", action="store_true",
+                    help="允许 CLS 里存在 0 样本的类（只求跑通链路时用；空类清单会写进 meta）")
+    ap.add_argument("--val-frac", type=float, default=0.2,
+                    help="分层切分的验证集比例（按类别内比例取，每类至少留 1 条在训练集）")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    samples = load_demos(Path(args.data), args.recursive)
+    samples, stats = load_demos(Path(args.data), args.recursive)
 
-    idx = np.random.permutation(len(samples))
-    n_val = max(4, int(len(samples) * 0.15))
-    val_idx, tr_idx = idx[:n_val], idx[n_val:]
+    # 类别普查 + 空类检查（默认拒绝训练），再做分层切分。
+    label_counts = [0] * len(CLS)
+    for s in samples:
+        label_counts[s["cls"]] += 1
+    print_census(stats, label_counts)
+    missing_classes = check_missing_classes(label_counts, args.allow_missing_classes)
+
+    tr_idx, val_idx, split_warn = stratified_split(
+        [s["cls"] for s in samples], args.val_frac, args.seed)
+    for w in split_warn:
+        print(f"  ⚠️ 切分: {w}")
+    if not val_idx:
+        sys.exit("分层切分后验证集为空——样本太少，先补采示范")
+    n_val = len(val_idx)
+    print(f"  分层切分: {len(tr_idx)} 训练 / {n_val} 验证（val_frac={args.val_frac}）")
 
     frames = torch.tensor(np.stack([samples[i]["frame"] for i in range(len(samples))]))
     frames = frames.unsqueeze(1)  # [N,1,H,W]
@@ -347,9 +521,15 @@ def main() -> None:
     cls_loss_fn = nn.CrossEntropyLoss(weight=cls_w)
     coord_loss_fn = nn.SmoothL1Loss(reduction="none")
 
+    # 多数类基线：val 上最大类占比。val_acc 不显著高于它 = 没有决策能力。
+    val_truth = cls[val_idx].tolist()
+    val_majority = max(Counter(val_truth).values()) / len(val_truth)
+    print(f"  多数类基线 {val_majority:.2%}（val_acc 不高于它，说明模型只是在猜最多数的类）")
+
     print(f"\n训练: {len(tr_idx)} 训练 / {n_val} 验证 | {args.epochs} epochs")
     best_acc = 0.0
     best_state = None
+    final_acc = 0.0
     for ep in range(args.epochs):
         model.train()
         perm = torch.randperm(len(tr_idx))
@@ -378,21 +558,51 @@ def main() -> None:
             coord_err = 0.0
             if t_mask.sum() > 0:
                 coord_err = float((coords[t_mask] - xy[val_idx][t_mask]).abs().mean())
+        final_acc = acc
         if ep % 10 == 9 or ep == 0:
+            # 同时报训练集准确率：只有 train 上不去才是「欠训」，
+            # train 高而 val 低才是「泛化/样本量」问题——两者对策完全不同。
+            with torch.no_grad():
+                tr_acc = float((model(frames[tr_idx])[0].argmax(dim=1)
+                                == cls[tr_idx]).float().mean())
             print(f"  epoch {ep+1:3d}  loss={total_loss/len(tr_idx):.4f}  "
-                  f"val_acc={acc:.2%}  tap坐标误差={coord_err:.3f}")
+                  f"train_acc={tr_acc:.2%}  val_acc={acc:.2%}  tap坐标误差={coord_err:.3f}")
         if acc >= best_acc:
             best_acc = acc
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
 
     if best_state:
         model.load_state_dict(best_state)
-    print(f"\n最佳验证准确率: {best_acc:.2%}")
+
+    # 用选中的模型在 val 上出完整报告（召回 + 预测分布 → 一眼看 mode collapse）
+    model.eval()
+    with torch.no_grad():
+        val_pred = model(frames[val_idx])[0].argmax(dim=1).tolist()
+    recall, pred_dist = per_class_report(val_truth, val_pred)
+
+    print(f"\n选优 val_acc={best_acc:.2%}（{args.epochs} epoch 里的最大值，"
+          f"受 {n_val} 样本粒度影响，偏乐观）")
+    print(f"末轮 val_acc={final_acc:.2%}   多数类基线={val_majority:.2%}")
+    print(f"验证集预测分布: {pred_dist}")
+    print("各类召回（验证集）:")
+    for name, r in recall.items():
+        print(f"  {name:<12} n={r['n']:<3} recall={r['recall']:.2f}")
 
     meta = {
         "trained_on": str(Path(args.data).resolve()),
         "samples": len(samples),
         "val_acc": round(best_acc, 4),
+        "val_acc_final": round(final_acc, 4),
+        "val_majority_baseline": round(val_majority, 4),
+        "val_samples": n_val,
+        "class_counts": {CLS[i]: n for i, n in enumerate(label_counts)},
+        "missing_classes": missing_classes,
+        "val_recall": recall,
+        "val_pred_dist": pred_dist,
+        # val_acc 是「若干 epoch 里在 val 上的最大值」，小样本下偏乐观。
+        # 别把它当能力指标：真正的门槛是「显著高于多数类基线 + 各类召回非零」。
+        "val_acc_note": "best-over-epochs on a tiny val split; optimistic. "
+                        "需显著高于 val_majority_baseline 且各类召回非零，才算有决策能力。",
         "down_w": 64,
         "down_h": 48,
         "trained_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),

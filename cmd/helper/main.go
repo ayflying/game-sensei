@@ -153,6 +153,16 @@ func main() {
 	flag.DurationVar(&cfg.DemoWait, "demo-wait", cfg.DemoWait, "每步动作后等待游戏响应的时间")
 	flag.StringVar(&cfg.DemoOut, "demo-out", cfg.DemoOut, "示范数据落盘目录（空=.workbuddy/demos/<时间戳>）")
 	flag.BoolVar(&cfg.DemoColor, "demo-color", cfg.DemoColor, "同时保存老师看到的彩色帧，便于人工复核")
+
+	// ---- 脚本化方向扫掠（不调用老师）----
+	flag.BoolVar(&cfg.Sweep, "sweep", cfg.Sweep,
+		"脚本化八向扫掠采集：按 AllDirs 顺序轮流推八向，标签是确定性真值、覆盖均衡，\n"+
+			"且不调用老师（零推理成本）。用于补齐学生方向类的样本，见 README §11.16")
+	flag.IntVar(&cfg.SweepRounds, "sweep-rounds", cfg.SweepRounds,
+		"扫掠轮数（一轮 = 走完 8 个方向）")
+	flag.IntVar(&cfg.SweepHoldMs, "sweep-hold-ms", cfg.SweepHoldMs,
+		"每个方向的推杆时长（毫秒）")
+
 	demoHints := flag.String("demo-hints", "", "额外的界面先验，多条用 ; 分隔（如摇杆中心坐标）")
 
 	// ---- 确定性计划执行（把已学会的流程固化：零模型、零推理成本）----
@@ -459,6 +469,26 @@ func main() {
 			stats.Steps, stats.Actions, stats.Waited.Round(time.Millisecond), stats.Timeouts)
 		logHook(fmt.Sprintf("计划结束：%d 步 / %d 动作 / 超时 %d 次",
 			stats.Steps, stats.Actions, stats.Timeouts))
+		return
+	}
+
+	// ---- 确定性方向扫掠（脚本化采集）----
+	//
+	// 与 -demo 的关系：demo 由老师逐步决策，方向是老师的偏好分布（实测偏斜严重，
+	// 8 向里只摸到 6 个，up/down 长期 0 样本）。sweep 反过来——标签不是猜的，
+	// 是「我这步按的就是 up_right」这种确定性真值，一轮下来 8 向覆盖必然均衡。
+	//
+	// 它不调用老师，所以放在 -demo 之前，也不做老师 ping 检查。
+	if cfg.Sweep {
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+		if !cfg.Live {
+			fmt.Println("⚠️  dry-run：扫掠会照常计时并落样，但不发送真实输入，加 -live 才真正推摇杆")
+		}
+		logHook("扫掠模式启动（" + mode + "）")
+		if err := runSweep(cfg, be, prof, stop, logHook); err != nil {
+			log.Fatalf("扫掠回路异常: %v", err)
+		}
 		return
 	}
 
