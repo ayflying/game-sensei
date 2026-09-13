@@ -49,8 +49,17 @@
   只在关键节点读 **1~2 张**小图确认。
 - 遇到 400 **不要原样重发同一批图**（必然再炸）；先削减图片**数量与体积**再重试。
 
-工具支持见 §6 的 `sp.py`（`shot` 自动出 `.s.jpg`、`pack` 批量压缩、`newest` 给可读路径）。
-跨项目通用工具：`python C:/Users/ay/.workbuddy/tools/shrink.py <图片或目录>`。
+工具支持：`cmd/shot`（安卓真机，**本仓库内唯一可用的压缩工具**）——
+`shot -o _cal.png` 截图并自动压出 `_cal.s.jpg`；
+`shot -tap 0.786,0.906 -o _aim.png -wait 2s` 先点一下再截图（标定新坐标最常用）；
+`shot -swipe 0.30,0.28,0.62,0.52 -drag 220ms -o _fling.png` 拖拽；
+`shot -front` 看前台包名；`shot -pack .workbuddy/demos` 给历史 PNG 批量补 `.s.jpg`。
+实测：真机 2136×3200 PNG 2969KB → `.s.jpg` 1024×683 / 86KB，**约 1/34**。
+
+> 2026-09-13 更正：此前本节的 `tools/sp.py` 与 `C:/Users/ay/.workbuddy/tools/shrink.py`
+> **两个路径都不存在**（前向引用的悬空路径）。本机没有 PIL，Python 侧压不动图，
+> 所以用 Go 复用 `internal/vision` + `internal/android` 实装了 `cmd/shot`。
+> 需要压缩请用 `cmd/shot`；`tools/sparkle/sp.py` 是另一款游戏（Sparkle）的专属脚本，与安卓无关。
 
 ---
 

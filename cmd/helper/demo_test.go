@@ -199,3 +199,62 @@ func TestMoveStallStep(t *testing.T) {
 		})
 	}
 }
+
+// 战斗态判定的滞回：只有连续 battleHoldFrames 帧都没检出战斗，才允许切回世界态。
+//
+// 为什么钉这条：IsBattle 是逐帧像素判据，而战斗的子界面（最典型是**投球瞄准态**——
+// 点 battle_catch 后五钮被收起、右下换成世界三钮，但敌方仍在场、战斗未结束）
+// 会让判定反复翻转。pet_run15 实测 92 帧翻转 28 次，每次都把老师的整套动作空间
+// 换掉（战斗态隐藏 MOVE / 世界态反之），老师只能跟着横跳。这是「战斗段动作横跳」
+// 的上游成因。
+func TestBattleStateStep(t *testing.T) {
+	// 单帧判定：检出即战斗，并清零未检出计数。
+	if now, streak := battleStateStep(false, true, 7); !now || streak != 0 {
+		t.Errorf("检出战斗应立即为 true 且清零 streak，得到 (%v, %d)", now, streak)
+	}
+	// 从未进入过战斗：不检出就是世界态。
+	if now, _ := battleStateStep(false, false, 0); now {
+		t.Error("没进过战斗时不该被判成战斗态")
+	}
+
+	// 滞回：进入战斗后，连续未检出帧数不足 battleHoldFrames 时保持战斗。
+	now, streak := true, 0
+	for i := 1; i < battleHoldFrames; i++ {
+		now, streak = battleStateStep(now, false, streak)
+		if !now {
+			t.Fatalf("第 %d 帧未检出就切回世界态了（应等满 %d 帧）", i, battleHoldFrames)
+		}
+		if streak != i {
+			t.Errorf("streak 应为 %d，得到 %d", i, streak)
+		}
+	}
+	// 攒满即切换。
+	now, _ = battleStateStep(now, false, streak)
+	if now {
+		t.Errorf("连续 %d 帧未检出后应切回世界态", battleHoldFrames)
+	}
+
+	// 真实形状：瞄准态那两个「世界外观」的帧不该把状态抖出去。
+	// 序列 = 战斗,战斗,世界,世界,战斗（run15 step18~22 的形状）
+	seq := []bool{true, true, false, false, true}
+	now, streak = false, 0
+	var got []bool
+	for _, d := range seq {
+		now, streak = battleStateStep(now, d, streak)
+		got = append(got, now)
+	}
+	for i, g := range got {
+		if !g {
+			t.Errorf("第 %d 帧被抖成世界态（整段都应在战斗中）：%v", i+1, got)
+		}
+	}
+
+	// 战斗真正结束时仍要能退出：连续 3 帧世界外观即切换。
+	now, streak = true, 0
+	for i := 0; i < battleHoldFrames; i++ {
+		now, streak = battleStateStep(now, false, streak)
+	}
+	if now {
+		t.Error("战斗真的结束后应能切回世界态（滞回不能变成卡死）")
+	}
+}

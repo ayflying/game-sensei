@@ -288,6 +288,42 @@ func moveStallStep(prevKind agent.ActionKind, diff float64, prevDir string, stre
 	return 1, prevDir // 首次出现，或老师换向后重新计数
 }
 
+// battleHoldFrames 是「战斗态判定」的滞回帧数：连续这么多帧都没检出战斗按钮排，
+// 才真正切回世界态。进入战斗态仍按单帧即时判（宁可早一点按战斗收窄动作空间）。
+//
+// 为什么必须滞回：IsBattle 是逐帧像素判据，而战斗里的若干子界面会临时把
+// 底部那排圆钮遮掉或换形——2026-09-13 pet_run15 实测最典型的是
+// **投球瞄准态**（点 battle_catch 后进入，界面收起五钮、右下换成世界三钮，
+// 但敌方精灵仍在场、血条不变，战斗并没结束）。
+//
+// 后果不是「少认了一次战斗」这么轻：state 每翻转一次，老师的**整套动作空间**
+// 都会换掉（战斗态隐藏 MOVE、只列战斗按钮与技能宏；世界态反之）。实测同一批帧
+// 上翻转 28 次/92 帧，老师只能跟着在「推摇杆」和「点战斗按钮」之间横跳，
+// 而两步都注定无效——这是「战斗段动作横跳」的**上游成因**，比提示词措辞更根本。
+//
+// 取 3 而不是 2：瞄准态在采集节奏（约 1 步/1.2~2s）下通常持续 1~2 帧，
+// 3 帧能覆盖它，又不至于把「战斗真的结束」拖得太久（世界态下多按 2 步战斗按钮，
+// 代价是白耗 2 步，可接受）。
+const battleHoldFrames = 3
+
+// battleStateStep 是战斗态判定的滞回状态机。
+//
+// 抽成纯函数是为了单测能钉住「什么时候允许切回世界态」——这段判据写错会让
+// 动作空间在错误的状态下收窄，而那种错误在日志里只表现为「老师乱点」，很难归因。
+//
+// prev 是上一步的判定；detected 是本帧的逐帧像素判据；streak 是连续未检出帧数。
+// 返回本步判定与新的 streak。
+func battleStateStep(prev, detected bool, streak int) (bool, int) {
+	if detected {
+		return true, 0 // 检出即战斗，并清空未检出计数
+	}
+	streak++
+	if prev && streak < battleHoldFrames {
+		return true, streak // 滞回：再等几帧，别急着切回世界
+	}
+	return false, streak
+}
+
 // runDemo 是「老师在线示范」回路（Phase 2 的第一块）。
 //
 // 与 Phase 1 的 teachLoop 有本质区别：
@@ -354,11 +390,11 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 	// 画面变化量有两个口径：
 	//   diff  —— 相邻两步，只用于日志（老师爱给 500ms 小步，这个值天生很小）
 	//   windowDiff —— 当前帧 vs stuckWindowSteps 步前的锚点帧，卡死判据看它
-	var prevGray *image.Gray  // 上一步的学生观测
+	var prevGray *image.Gray   // 上一步的学生观测
 	var anchorGray *image.Gray // 卡死窗口的锚点帧
-	var anchorStep int        // 锚点帧所在的步号
-	var windowDiff float64    // 一个窗口内的画面变化量（卡死判据用）
-	var stuckStreak int       // 连续多少个窗口没推动世界
+	var anchorStep int         // 锚点帧所在的步号
+	var windowDiff float64     // 一个窗口内的画面变化量（卡死判据用）
+	var stuckStreak int        // 连续多少个窗口没推动世界
 	// moveStallStreak 是「连续朝同一方向移动、但单步画面变化量都很小」的步数。
 	//
 	// 与 stuckStreak 的分工：stuckStreak 看**跨窗口**变化量（判「整段时间世界没动」），
@@ -370,9 +406,12 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 	// moveStallDir 是上一个「小 Δ 移动」的方向。换方向即清零 streak——
 	// 否则老师刚换了向、Δ 仍小，提示词会继续说「禁止再沿原方向走」，与它刚做的事矛盾。
 	var moveStallDir string
-	var escapeIdx int         // 摇杆兜底脱困的方向轮换游标
-	var escapeAttempt int     // 脱困次数：奇数轮跑档案脚本、偶数轮摇杆长推
-	var inBattle bool         // 当前帧是否处于回合战斗态（底部 5 圆钮判据）
+	var escapeIdx int     // 摇杆兜底脱困的方向轮换游标
+	var escapeAttempt int // 脱困次数：奇数轮跑档案脚本、偶数轮摇杆长推
+	var inBattle bool     // 当前帧是否处于回合战斗态（底部 5 圆钮判据）
+	// nonBattleStreak 是「连续多少帧没检测到战斗」。只有它攒够 battleHoldFrames
+	// 才真正切回世界态——见 battleStateStep 的说明（治状态闪断）。
+	var nonBattleStreak int
 	// 冷却是「两次脱困之间至少隔这么多步」。初值取 -cooldown 而不是 0：
 	// 否则开局前 cooldown 步里 1-lastEscapeStep < cooldown，明明卡住也不脱困
 	// （实测：老师连发 15 步 up_right、Δ 全在 1~2，脱困却一次没触发）。
@@ -478,7 +517,8 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 		// 后续三处按态保护都读它：卡死不推摇杆、兜底不跨态轮播、提示词隐藏 MOVE。
 		wasBattle := inBattle
 		if prof.CanDetectBattle() {
-			inBattle = prof.IsBattle(color)
+			inBattle, nonBattleStreak = battleStateStep(
+				inBattle, prof.IsBattle(color), nonBattleStreak)
 			if inBattle != wasBattle {
 				msg := "进入回合战斗态（底部检测到战斗按钮排）"
 				if !inBattle {
@@ -488,7 +528,7 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 				logHook(msg)
 			}
 		} else {
-			inBattle = false
+			inBattle, nonBattleStreak = false, 0
 		}
 		uiState := ""
 		if inBattle {
@@ -879,9 +919,9 @@ func runDemo(cfg config.Config, be backend, dem *teacher.Demonstrator, prof *gam
 				if step > 1 && act.String() == info.PrevAction {
 					repeat = " ⚠️与上一步相同"
 				}
-			// L1 → L2 都打出来：左边是模型的意图，右边是最终落到设备上的操作。
-			// 末尾 Δ 是相对上一步的画面变化量（诊断用；卡死判据看的是跨窗口的
-			// windowDiff，因为老师常给 500ms 小步，单步 Δ 天生就小）。
+				// L1 → L2 都打出来：左边是模型的意图，右边是最终落到设备上的操作。
+				// 末尾 Δ 是相对上一步的画面变化量（诊断用；卡死判据看的是跨窗口的
+				// windowDiff，因为老师常给 500ms 小步，单步 Δ 天生就小）。
 				line := fmt.Sprintf("[%s] %s %-20s → %-28s | %s | Δ%.1f | %.1fs %dtok%s",
 					tag, mark, act.String(), expanded.String(),
 					agent.ExplainAction(act), diff, info.LatencyMs/1000, info.OutTokens, repeat)

@@ -374,6 +374,107 @@ func TestBuildDemoPrompt_移动停滞要求换方向(t *testing.T) {
 	}
 }
 
+// 重复禁令必须由「画面有没有变化」把关，不能由次数把关。
+//
+// pet_run14 实况：战斗里 battle_catch 每次 Δ≈25（正常投球），却被旧禁令锁死；
+// 老师被迫改按 cast_hetu（Δ≈1.2，技能放不出去），再被禁，再换回来——
+// cast_hetu ↔ battle_catch 无限 A/B 横跳。根因与 MOVE 那次同源。
+func TestBuildDemoPrompt_重复但画面在变不禁令(t *testing.T) {
+	// 重复 + 画面明显在变 → 不许禁，必须告诉它「它在起作用」。
+	live := &Demonstrator{
+		PrevAction:  "press:battle_catch",
+		PrevKind:    agent.ActionPress,
+		RepeatCount: 5,
+		LastDiff:    25.0,
+		UIState:     game.StateBattle,
+	}
+	pl := live.BuildDemoPrompt()
+	if strings.Contains(pl, "禁止再选它") {
+		t.Errorf("有效动作被重复禁令误杀——这正是战斗态 A/B 横跳的成因\n---\n%s", pl)
+	}
+	for _, want := range []string{"在起作用", "25.0"} {
+		if !strings.Contains(pl, want) {
+			t.Errorf("应点明「重复但有效」，缺 %q\n---\n%s", want, pl)
+		}
+	}
+
+	// 重复 + 画面几乎没变 → 该禁，而且要给出「为什么没生效」的成因。
+	dead := &Demonstrator{
+		PrevAction:  "press:cast_hetu",
+		PrevKind:    agent.ActionPress,
+		RepeatCount: 3,
+		LastDiff:    1.2,
+		UIState:     game.StateBattle,
+	}
+	pd := dead.BuildDemoPrompt()
+	if !strings.Contains(pd, "禁止再选它") {
+		t.Errorf("无效果动作必须禁止再选\n---\n%s", pd)
+	}
+	for _, want := range []string{"没有生效", "资源/次数不足", "1.2"} {
+		if !strings.Contains(pd, want) {
+			t.Errorf("应点名「没生效」的成因，缺 %q\n---\n%s", want, pd)
+		}
+	}
+
+	// 阈值边界：恰好等于阈值视为「有效」（用 >=），不该被禁。
+	edge := &Demonstrator{
+		PrevAction:  "press:battle_catch",
+		PrevKind:    agent.ActionPress,
+		RepeatCount: 4,
+		LastDiff:    actionProgressEps,
+	}
+	if strings.Contains(edge.BuildDemoPrompt(), "禁止再选它") {
+		t.Errorf("Δ 恰好等于阈值 %.1f 应算有效\n---\n%s", actionProgressEps, edge.BuildDemoPrompt())
+	}
+
+	// 拿不到 Δ（回放/首步）时保持原来的保守禁令，不许因为缺失就放行。
+	unknown := &Demonstrator{
+		PrevAction:  "press:jump",
+		PrevKind:    agent.ActionPress,
+		RepeatCount: 5,
+	}
+	if !strings.Contains(unknown.BuildDemoPrompt(), "禁止再选它") {
+		t.Error("没有 Δ 数据时应维持保守禁令")
+	}
+}
+
+// 横跳告警必须按界面态分流：战斗态提示词里根本没有 MOVE，
+// 喊「朝同一个方向连续走」是错的建议（pet_run14 就是照世界态那句写的）。
+func TestBuildDemoPrompt_横跳告警分界面态(t *testing.T) {
+	const a, b = "press:cast_hetu", "press:battle_catch"
+	recent := []string{a, b, a, b, a, b}
+
+	battle := &Demonstrator{
+		PrevAction:    b,
+		PrevKind:      agent.ActionPress,
+		RepeatCount:   1,
+		RecentActions: recent,
+		UIState:       game.StateBattle,
+	}
+	pb := battle.BuildDemoPrompt()
+	if !strings.Contains(pb, "横跳") {
+		t.Fatalf("战斗态横跳也该告警\n---\n%s", pb)
+	}
+	if strings.Contains(pb, "朝**同一个方向连续走**") {
+		t.Errorf("战斗态没有摇杆，不该给移动建议\n---\n%s", pb)
+	}
+	if !strings.Contains(pb, "前置条件") {
+		t.Errorf("战斗态横跳应指向「前置条件未满足」而不是「换动作」\n---\n%s", pb)
+	}
+
+	world := &Demonstrator{
+		PrevAction:    "move:up_left/500ms",
+		PrevKind:      agent.ActionMove,
+		RepeatCount:   1,
+		RecentActions: []string{"move:up_right/500ms", "move:up_left/500ms", "move:up_right/500ms", "move:up_left/500ms", "move:up_right/500ms", "move:up_left/500ms"},
+		UIState:       game.StateWorld,
+	}
+	pw := world.BuildDemoPrompt()
+	if !strings.Contains(pw, "朝**同一个方向连续走**") {
+		t.Errorf("世界态横跳应保留移动建议\n---\n%s", pw)
+	}
+}
+
 // 最近动作列表与横跳告警：模型只看得见「最近几步」才可能发现自己打转。
 func TestBuildDemoPrompt_最近动作与横跳告警(t *testing.T) {
 	const ur, ul = "move:up_right/500ms", "move:up_left/500ms"
