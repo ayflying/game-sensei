@@ -99,28 +99,10 @@ var escapeDirs = []agent.Dir{
 
 // frameDiff 返回两帧灰度图的逐像素平均绝对差（0~255）。
 //
-// 尺寸不一致或无帧时返回 255（视为「变化很大」）：宁可漏判一次卡死，
-// 也不要因为一次尺寸抖动误判、把老师的正常动作顶掉。
+// 实现已收敛到 internal/vision.FrameDiff（hunt/shot/诊断脚本共用同一份），
+// 这里只保留一个薄壳，避免回路的调用点全部改名。量纲见该函数的注释。
 func frameDiff(a, b *image.Gray) float64 {
-	if a == nil || b == nil || a.Bounds() != b.Bounds() {
-		return 255
-	}
-	bb := a.Bounds()
-	if bb.Dx() == 0 || bb.Dy() == 0 {
-		return 255
-	}
-	var sum uint64
-	for y := bb.Min.Y; y < bb.Max.Y; y++ {
-		row := y * a.Stride
-		for x := bb.Min.X; x < bb.Max.X; x++ {
-			d := int(a.Pix[row+x]) - int(b.Pix[row+x])
-			if d < 0 {
-				d = -d
-			}
-			sum += uint64(d)
-		}
-	}
-	return float64(sum) / float64(bb.Dx()*bb.Dy())
+	return vision.FrameDiff(a, b)
 }
 
 // runTapScript 顺序执行一条「点/拖 + 等待」脚本。

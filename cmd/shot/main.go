@@ -30,7 +30,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ayflying/game-sensei/internal/agent"
 	"github.com/ayflying/game-sensei/internal/android"
+	"github.com/ayflying/game-sensei/internal/game"
 	"github.com/ayflying/game-sensei/internal/vision"
 )
 
@@ -47,11 +49,18 @@ func main() {
 		width    = flag.Int("w", smallWidth, "压缩图最大宽度（像素）")
 		tapArg   = flag.String("tap", "", "截图前先点一下，归一化坐标 x,y（如 0.786,0.906）")
 		swipeArg = flag.String("swipe", "", "截图前先拖拽，归一化 x1,y1,x2,y2")
+		pressArg = flag.String("press", "", "截图前先按「命名按钮/宏」（如 cast_hetu、gather_energy、battle_catch）；宏会按档案整条跑完")
+		seqArg   = flag.String("seq", "", "截图前执行一串点击，语法 x,y:等待ms;x,y:等待ms（如 \"0.10,0.30:800;0.60,0.35:4000\"）。标定「点A再点B」这类两步手势用")
 		dragMs   = flag.Int("drag", 220, "拖拽时长（毫秒），仅 -swipe 有效")
 		wait     = flag.Duration("wait", 1500*time.Millisecond, "动作后等待多久再截图")
+		delta    = flag.Bool("delta", false, "打印动作前后的画面变化量 Δ（逐像素平均绝对差）；标定时用它判「这一步到底生效没有」")
+		ab       = flag.Bool("ab", false, "额外把动作前的帧存成 <out>.before.png（做 A/B 对照）")
+		downW    = flag.Int("down", 320, "算 Δ 用的灰度降采样宽度")
 		front    = flag.Bool("front", false, "只打印前台包名后退出")
 		pack     = flag.String("pack", "", "批量模式：把该目录（含子目录）里的 PNG 压成同名 .s.jpg")
 		noJPG    = flag.Bool("nojpg", false, "只存原始 PNG，不生成压缩图")
+		check    = flag.Bool("check", false, "只打印当前帧的界面态判定（world/battle）后退出，不落图")
+		gameName = flag.String("game", "nrc", "判定界面态/解析命名按钮用哪个游戏档案")
 	)
 	flag.Parse()
 
@@ -76,7 +85,38 @@ func main() {
 		return
 	}
 
+	// -check：只做界面态判定。给「自动找一场战斗」这类循环用——
+	// 走一步、判一次，比人肉看截图快得多，也避免把帧堆进对话（§0.4）。
+	if *check {
+		img, err := dev.Screenshot()
+		if err != nil {
+			fail(err)
+		}
+		prof, err := game.Load(*gameName)
+		if err != nil {
+			fail(err)
+		}
+		if prof.IsBattle(img) {
+			fmt.Println("battle")
+		} else {
+			fmt.Println("world")
+		}
+		return
+	}
+
 	// 可选：先做动作——标定时最常用的就是「点一下再截图」。
+	//
+	// -delta / -ab 需要动作**前**的一帧做基准，所以先抓一帧（灰度算 Δ，彩色备用）。
+	var beforeGray *image.Gray
+	var beforeImg image.Image
+	if *delta || *ab {
+		beforeImg, err = dev.Screenshot()
+		if err != nil {
+			fail(err)
+		}
+		beforeGray = android.ToGrayDownsampled(beforeImg, *downW)
+	}
+
 	if *tapArg != "" {
 		x, y, err := parsePair(*tapArg)
 		if err != nil {
@@ -101,6 +141,34 @@ func main() {
 		fmt.Printf("swipe (%.3f,%.3f)→(%.3f,%.3f) %v\n", v[0], v[1], v[2], v[3], d)
 		time.Sleep(*wait)
 	}
+	// -press：按「命名按钮或宏」出招。宏（cast_hetu / gather_energy …）是**多步**序列，
+	// 这里按档案里的 steps 依次点/拖 + 等待，语义与 helper 回路里跑宏完全一致——
+	// 这样标定时试出来的结论，回到回路里行为不变。
+	if *pressArg != "" {
+		if err := pressByName(dev, *gameName, *pressArg, *wait); err != nil {
+			fail(err)
+		}
+	}
+	// -seq：一串「点一下 → 等一会」的定点连击。
+	//
+	// 存在的理由：有些手势是**两步**的（洛克王国战斗抓宠：「点左上咕噜球」→「点目标精灵」），
+	// 单点工具表达不了。把序列写成命令行参数而不是往档案里塞宏，是因为标定期间这些
+	// 坐标大多还是**猜的**——猜错的坐标不该污染档案。
+	if *seqArg != "" {
+		steps, err := parseSeq(*seqArg)
+		if err != nil {
+			fail(err)
+		}
+		for i, s := range steps {
+			px, py, err := dev.TapNorm(s.x, s.y)
+			if err != nil {
+				fail(err)
+			}
+			fmt.Printf("seq %d/%d tap (%.3f,%.3f) → 像素 (%d,%d) 等 %dms\n",
+				i+1, len(steps), s.x, s.y, px, py, s.waitMs)
+			time.Sleep(time.Duration(s.waitMs) * time.Millisecond)
+		}
+	}
 
 	img, err := dev.Screenshot()
 	if err != nil {
@@ -108,6 +176,21 @@ func main() {
 	}
 	b := img.Bounds()
 	fmt.Printf("screenshot %dx%d\n", b.Dx(), b.Dy())
+
+	// Δ：动作前 vs 动作后的逐像素平均绝对差。量纲见 internal/vision.FrameDiff。
+	// 经验读数（洛克王国真机）：<3 画面基本没动（动作没生效）；10~60 角色在走；
+	// >60 整屏变化（开图/转场/技能特效）。
+	if beforeGray != nil {
+		after := android.ToGrayDownsampled(img, *downW)
+		fmt.Printf("Δ=%.1f\n", vision.FrameDiff(beforeGray, after))
+	}
+	if *ab && beforeImg != nil {
+		beforePath := strings.TrimSuffix(*out, filepath.Ext(*out)) + ".before.png"
+		if err := android.SavePNG(beforeImg, beforePath); err != nil {
+			fail(err)
+		}
+		fmt.Printf("PNG（动作前）%s\n", beforePath)
+	}
 
 	if *out == "" {
 		*out = filepath.Join(".workbuddy", "demos", "_shot.png")
@@ -137,6 +220,96 @@ func main() {
 	absJ, _ := filepath.Abs(jpgPath)
 	sb := small.Bounds()
 	fmt.Printf("JPG  %s (%dx%d, %d KB) ← 读这张\n", absJ, sb.Dx(), sb.Dy(), len(raw)/1024)
+}
+
+// pressByName 执行一次「命名按钮 / 宏」。
+//
+// 宏是多步序列（展开技能盘 → 点技能卡 → 等回合结算），这里按 steps 依次执行，
+// 与 helper 回路的宏执行语义保持一致；普通按钮则交给档案把 L1 PRESS 解析成
+// L2 的点击/按键再执行。两条路都不经过任何模型，结果可复现。
+func pressByName(dev *android.Device, gameName, name string, defWait time.Duration) error {
+	prof, err := game.Load(gameName)
+	if err != nil {
+		return err
+	}
+	if m, ok := prof.Macro(name); ok {
+		fmt.Printf("宏 %s（%d 步）\n", m.Name, len(m.Steps))
+		for i, st := range m.Steps {
+			wait := time.Duration(st.WaitMs) * time.Millisecond
+			if wait <= 0 {
+				wait = defWait
+			}
+			act := agent.Action{Kind: agent.ActionTap, Nx: st.Pos[0], Ny: st.Pos[1]}
+			desc := fmt.Sprintf("点 %.3f,%.3f", st.Pos[0], st.Pos[1])
+			if st.To[0] != 0 || st.To[1] != 0 {
+				dragMs := st.DragMs
+				if dragMs <= 0 {
+					dragMs = 600
+				}
+				act = agent.Action{
+					Kind: agent.ActionSwipe,
+					Nx:   st.Pos[0], Ny: st.Pos[1],
+					Nx2:  st.To[0], Ny2: st.To[1],
+					Dur:  time.Duration(dragMs) * time.Millisecond,
+				}
+				desc = fmt.Sprintf("拖 %.3f,%.3f→%.3f,%.3f/%dms", st.Pos[0], st.Pos[1], st.To[0], st.To[1], dragMs)
+			}
+			if err := dev.Apply(act); err != nil {
+				return fmt.Errorf("宏第 %d 步失败: %w", i+1, err)
+			}
+			fmt.Printf("  步 %d/%d %s\n", i+1, len(m.Steps), desc)
+			time.Sleep(wait)
+		}
+		return nil
+	}
+
+	act, err := prof.Resolve(agent.Action{Kind: agent.ActionPress, Name: name})
+	if err != nil {
+		return fmt.Errorf("档案里没有按钮/宏 %q: %w", name, err)
+	}
+	if err := dev.Apply(act); err != nil {
+		return err
+	}
+	fmt.Printf("press %s → %v\n", name, act)
+	time.Sleep(defWait)
+	return nil
+}
+
+// seqStep 是 -seq 里的一步：归一化坐标 + 这一步之后的等待毫秒数。
+type seqStep struct {
+	x, y   float64
+	waitMs int
+}
+
+// parseSeq 解析 "x,y:wait;x,y:wait" 形式的连击序列。
+// wait 可省略（默认 800ms），也可带 ms 后缀。
+func parseSeq(s string) ([]seqStep, error) {
+	var out []seqStep
+	for _, item := range strings.Split(s, ";") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		coord, waitStr, hasWait := strings.Cut(item, ":")
+		x, y, err := parsePair(coord)
+		if err != nil {
+			return nil, fmt.Errorf("-seq 里的 %q 不是 x,y 形式: %w", coord, err)
+		}
+		wait := 800
+		if hasWait {
+			w := strings.TrimSuffix(strings.TrimSpace(waitStr), "ms")
+			v, err := strconv.Atoi(w)
+			if err != nil {
+				return nil, fmt.Errorf("-seq 里的等待 %q 不是毫秒整数", waitStr)
+			}
+			wait = v
+		}
+		out = append(out, seqStep{x: x, y: y, waitMs: wait})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("-seq 为空")
+	}
+	return out, nil
 }
 
 // openDevice 打开安卓设备：adbPath/serial 留空时自动发现。
