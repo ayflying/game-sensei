@@ -68,6 +68,27 @@ type Step struct {
 	// Until 推进条件：满足它才进入下一步。为空则按 GapMs 固定等待。
 	Until *Until `json:"until,omitempty"`
 
+	// When 是**前置条件**：进入本步前先判定一次，满足才执行本步；
+	// 不满足则整步跳过（不打任何动作、不等待）。不写 When 就是「永远执行」。
+	//
+	// 为什么需要（2026-09-13 真机实测的硬缺口）：plan 是顺序执行的，没有
+	// 「现在在哪一屏」的概念，所以「清理弹窗」这类步骤在没有弹窗时**是有害的**——
+	// 实测在主界面按 popup_close 的坐标 (0.85,0.185) 会直接跳进 MY CLOSET，
+	// 把后面所有步骤一起带偏（判据从 7.9% 掉到 0.5%，整份计划 5 步全超时）。
+	//
+	// 语义是「前置条件（precondition）」而不是「跳过条件」，因为读起来更直白：
+	//   · 进关步骤   when=「主题页票券条可见」  → 只有还在主题页才点卡片
+	//   · 退出步骤   when=「结算页 Exit 可见」  → 只有真在结算页才点 Exit
+	// 反面情形（幂等跳过）用否定式表达：
+	//   · 清弹窗步骤 when=「ADS 徽章不可见」    → 主界面已露出徽章就跳过
+	// 2026-09-13 真机实测踩过的坑：早期把语义定成「满足则跳过」，于是退出步骤
+	// 写成 when=「Exit 可见」就变成了「结算页在就跳过」——恰好写反，实测在
+	// 非结算页也照样点了一次 Exit（日志里表现为「前置条件未满足，执行本步」）。
+	//
+	// 只允许 ratio 类型：前置条件必须依据「绝对特征」（某 UI 在不在），
+	// change/stable 是相对量，没有基准帧时无意义，在 Validate 里会报错。
+	When *Until `json:"when,omitempty"`
+
 	// TimeoutMs 等待 Until 的超时（毫秒，默认 3000）。超时不一定致命：
 	// 界面可能没按预期变（比如弹了活动弹窗），默认记日志继续，见 Strict。
 	TimeoutMs int `json:"timeout_ms,omitempty"`
@@ -75,6 +96,44 @@ type Step struct {
 	// Strict 为 true 时，Until 超时会让整个计划失败；默认 false（宽松跳过）。
 	// 宽松是默认，因为手游随时可能插播广告/活动弹窗，硬失败会让计划一步都走不完。
 	Strict bool `json:"strict,omitempty"`
+
+	// OnTimeout 是超时补偿动作：Until 等满 TimeoutMs 仍未满足时，依次执行这里
+	// 写的一个或多个动作（用 `;` 分隔），然后按**同一个 Until**再等一轮；
+	// 再超时才走 Strict/宽松流程。
+	//
+	// 为什么需要（2026-09-13 实测的硬缺口）：手游的推进经常被**不可控的插屏/激励广告**
+	// 截断。实测点 Change 触发激励视频后：
+	//   · 真机 —— 广告播完自动回到游戏，继续走评审页 -> 结算页；
+	//   · 模拟器 —— 无真实广告源，广告会停在「播放层」或「Reward granted 结束页」上
+	//     不自动消失（实测 45s 不消失），后续步骤全部卡死。
+	//
+	// 实测广告有多个卡点（播放层 / 结束页 / 应用商店详情页），关法不同：
+	//   · 播放层、应用详情页 —— `ACTION KEY code=back` 能关掉；
+	//   · 评审页            —— back 等于「跳过评审直接进结算」，朝目标前进。
+	//
+	// ⚠️ 补偿动作必须选**无副作用**的：实测在广告播放中点右上角「关闭」键的坐标，
+	// 会命中「跳转应用商店」热点、把游戏带去 Google Play；而这类广告 Activity
+	// 挂在**游戏包名下**，`IsForeground(pkg)` 的前台检查拦不住。所以正式档案的
+	// 补偿只写返回键（见 sparkle.json step4），不要点广告区域内的任何坐标。
+	//
+	// 与 When 的分工：When 是**事前**守卫（该不该做这一步），OnTimeout 是**事后**兜底
+	// （做了但没等到结果时补一手）。补偿动作同样走 r.act，享受安全检查与重试。
+	OnTimeout string `json:"on_timeout,omitempty"`
+
+	// CompRetries > 0 时，Until 超时后执行 OnTimeout 并**重新等待**，
+	// 最多这样重试这么多轮；全都没等到才走 Strict/宽松流程。默认 1（补一次）。
+	//
+	// 为什么需要多轮（2026-09-13 实测）：激励视频的卡法不止一种——可能卡在
+	// 播放层、可能卡在结束页、偶发还会跳去应用商店。单补一次只能处理其中一种。
+	// 用**安全的推进键**（返回键）周期性补偿则必然收敛：实测返回键在
+	//   广告播放层/应用详情页 -> 关掉它们回到游戏；
+	//   评审页           -> 跳过评审直接进结算页；
+	// 两者都朝目标前进，于是「每等 N 秒按一次返回键」最多几轮就能等到结算页。
+	//
+	// ⚠️ 补偿动作必须选**无副作用**的（返回键），不要点广告区域里的按钮：
+	// 实测在广告播放中点右上角 X 会命中「跳转应用商店」热点，把游戏带去
+	// Google Play——而这类广告 Activity 挂在游戏包名下，前台检查拦不住。
+	CompRetries int `json:"comp_retries,omitempty"`
 }
 
 // Until 是推进条件——用画面反馈决定何时继续，代替写死的 sleep。
@@ -176,6 +235,28 @@ type ColorGrabber interface {
 	GrabColorFresh() (image.Image, error)
 }
 
+// SafetyChecker 是可选能力：在发出**真实输入**之前，判断「现在能不能安全操作」。
+//
+// 为什么需要（DEVELOPMENT_PLAN §8 安全停止规则 + P0 任务「前台检测/断连停止」）：
+// 执行计划的唯一输出是真实输入。一旦目标漂移——应用被切到后台、设备断连、
+// 锁屏或别的应用弹到前台——后续每一步都会落到**别的应用**上。这不是
+// 「计划失败」，而是**误操作**，所以必须在下发输入前重新确认目标，
+// 不能只靠启动时检查一次（启动检查解决的是「一开始就在错的地方」，
+// 这里解决的是「跑着跑着漂走了」）。
+//
+// 返回 nil = 可以安全发输入；非 nil = 立即停止，原因原样上报并记入日志。
+// 未实现该接口的后端不做检查（向后兼容，测试用假后端不受影响）。
+type SafetyChecker interface {
+	CheckSafe() error
+}
+
+// actRetries 是单个动作的最大尝试次数。
+//
+// 为什么需要（P0 任务「增加动作超时/重试」）：ADB 的 input 注入偶发失败
+// （与 screencap 的偶发失败同源，见 grabFresh 注释），而 plan 的动作大多是
+// 幂等点击——重点一次通常无害。不重试的话一次瞬时抖动就会终止整份计划。
+const actRetries = 3
+
 // 默认抓帧降采样宽度。差异检测不需要清晰画面，越小越快：
 // 64px 宽的灰度帧足以判断「界面有没有切换」。
 const defaultDownWidth = 64
@@ -186,15 +267,51 @@ type Stats struct {
 	Actions  int           // 实际发出的动作次数（含 Repeat）
 	Waited   time.Duration // 累计等待时长
 	Timeouts int           // Until 超时次数（宽松跳过）
+	Skipped  int           // 被前置守卫 when 跳过的步数
+
+	// ---- 性能指标（DEVELOPMENT_PLAN P0 验收要求「记录截图/推理/动作/端到端延迟」）----
+	Grabs         int           // 彩色抓帧次数（判据轮询 + 守卫）
+	GrabTime      time.Duration // 抓帧累计耗时（安卓单帧约 0.94s，通常是最大头）
+	ActionTime    time.Duration // 动作下发累计耗时
+	ActionRetries int           // 动作重试次数（瞬时失败）
+	ActionErrors  int           // 重试后仍失败的动作数
+	SafetyChecks  int           // 通过的安全检查次数
+	Elapsed       time.Duration // 整份计划的墙钟耗时
+}
+
+// metrics 是 Runner 内部的累计器，收尾时一次性写进 Stats。
+//
+// 为什么不在 Runner 上直接改 Stats：Stats 是给调用方的**结果快照**，
+// 中途暴露一个半成品会让「计划还在跑」和「跑完了」两种状态的用法混在一起。
+type metrics struct {
+	grabs         int
+	grabTime      time.Duration
+	actions       int
+	actionTime    time.Duration
+	actionRetries int
+	actionErrors  int
+	safetyChecks  int
+}
+
+// applyTo 把累计器写进对外结果快照。
+func (m metrics) applyTo(st *Stats) {
+	st.Actions = m.actions
+	st.Grabs = m.grabs
+	st.GrabTime = m.grabTime
+	st.ActionTime = m.actionTime
+	st.ActionRetries = m.actionRetries
+	st.ActionErrors = m.actionErrors
+	st.SafetyChecks = m.safetyChecks
 }
 
 // Runner 执行一份 Plan。
 type Runner struct {
-	exec  Executor
-	logf  func(format string, args ...any)
-	sleep func(time.Duration)
-	now   func() time.Time
-	downW int
+	exec    Executor
+	logf    func(format string, args ...any)
+	sleep   func(time.Duration)
+	now     func() time.Time
+	downW   int
+	metrics metrics
 }
 
 // Option 调整 Runner 行为（测试与非默认场景用）。
@@ -259,32 +376,35 @@ func (p *Plan) Validate() error {
 			return fmt.Errorf("plan %q 第 %d 步（%s）动作无法解析: %q（%v）",
 				p.Name, i+1, st.Name, st.Action, err)
 		}
-		if st.Until != nil {
-			switch st.Until.Type {
-			case "", TypeChange, TypeStable, TypeRatio, TypeTime:
-			default:
-				return fmt.Errorf("plan %q 第 %d 步（%s）until.type 不合法: %q（可选 change|stable|ratio|time）",
-					p.Name, i+1, st.Name, st.Until.Type)
+		// on_timeout 只有「有 until 可等」时才成立——没有 until 就没有超时，
+		// 补偿动作永远不会被触发，说明档案写错了。
+		if st.OnTimeout != "" {
+			if _, err := parseTimeoutActions(st.OnTimeout); err != nil {
+				return fmt.Errorf("plan %q 第 %d 步（%s）on_timeout 无法解析: %q（%v）",
+					p.Name, i+1, st.Name, st.OnTimeout, err)
 			}
-			if st.Until.Type == TypeRatio {
-				r := st.Until
-				if r.Color == [3]int{} {
-					return fmt.Errorf("plan %q 第 %d 步（%s）ratio 条件缺 color [R,G,B]",
-						p.Name, i+1, st.Name)
-				}
-				for _, c := range r.Color {
-					if c < 0 || c > 255 {
-						return fmt.Errorf("plan %q 第 %d 步（%s）ratio 的 color 分量须在 0~255",
-							p.Name, i+1, st.Name)
-					}
-				}
-				// min_ratio 与 max_ratio 语义相反（出现 vs 消失），同时给是配置错误：
-				// 若两个都写，判据会变成「a<=x<=b」这种谁也不想要的东西。
-				if r.MinRatio > 0 && r.MaxRatio > 0 {
-					return fmt.Errorf("plan %q 第 %d 步（%s）ratio 的 min_ratio 与 max_ratio 互斥："+
-						"min_ratio 判「目标色出现」，max_ratio 判「目标色消失」，只能给一个",
-						p.Name, i+1, st.Name)
-				}
+			if st.Until == nil {
+				return fmt.Errorf("plan %q 第 %d 步（%s）写了 on_timeout 但没有 until ——"+
+					"补偿动作只在等待超时时触发，没有 until 就永远不会执行",
+					p.Name, i+1, st.Name)
+			}
+		}
+		// comp_retries 只在「有 on_timeout 可补」时才成立——没有补偿动作，
+		// 重试轮数无处作用。上限 20 轮是防呆：补偿轮数 × 超时时间 = 最长等待，
+		// 写错一个 0 会让一步卡到天亮。
+		if st.CompRetries != 0 {
+			if st.OnTimeout == "" {
+				return fmt.Errorf("plan %q 第 %d 步（%s）写了 comp_retries 但没有 on_timeout ——"+
+					"重试轮数只在有补偿动作时才有意义", p.Name, i+1, st.Name)
+			}
+			if st.CompRetries < 0 || st.CompRetries > 20 {
+				return fmt.Errorf("plan %q 第 %d 步（%s）comp_retries=%d 越界（允许 1..20）",
+					p.Name, i+1, st.Name, st.CompRetries)
+			}
+		}
+		if st.Until != nil {
+			if err := validateUntil(p.Name, i+1, st.Name, "until", st.Until); err != nil {
+				return err
 			}
 			if st.MaxRepeat < 0 {
 				return fmt.Errorf("plan %q 第 %d 步（%s）max_repeat 不能为负", p.Name, i+1, st.Name)
@@ -305,6 +425,49 @@ func (p *Plan) Validate() error {
 			return fmt.Errorf("plan %q 第 %d 步（%s）有 max_repeat 但没有 until，"+
 				"循环模式必须给出停止条件，否则会一直点到上限", p.Name, i+1, st.Name)
 		}
+		if st.When != nil {
+			// 前置条件只认 ratio：它要回答「画面现在是不是处于这个状态」，
+			// 这是**绝对特征**问题；change/stable 是相对量，没有基准帧无从判定。
+			if st.When.Type != TypeRatio {
+				return fmt.Errorf("plan %q 第 %d 步（%s）when 只支持 ratio 条件（判「画面处于该状态才执行本步」），"+
+					"当前是 %q", p.Name, i+1, st.Name, st.When.Type)
+			}
+			if err := validateUntil(p.Name, i+1, st.Name, "when", st.When); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateUntil 校验一个 Until 条件本身的合法性。
+// field 用于报错文案（"until" 或 "when"），让「哪个字段写错」一眼可辨。
+func validateUntil(planName string, stepNo int, stepName, field string, u *Until) error {
+	switch u.Type {
+	case "", TypeChange, TypeStable, TypeRatio, TypeTime:
+	default:
+		return fmt.Errorf("plan %q 第 %d 步（%s）%s.type 不合法: %q（可选 change|stable|ratio|time）",
+			planName, stepNo, stepName, field, u.Type)
+	}
+	if u.Type != TypeRatio {
+		return nil
+	}
+	if u.Color == [3]int{} {
+		return fmt.Errorf("plan %q 第 %d 步（%s）%s 缺 color [R,G,B]",
+			planName, stepNo, stepName, field)
+	}
+	for _, c := range u.Color {
+		if c < 0 || c > 255 {
+			return fmt.Errorf("plan %q 第 %d 步（%s）%s 的 color 分量须在 0~255",
+				planName, stepNo, stepName, field)
+		}
+	}
+	// min_ratio 与 max_ratio 语义相反（出现 vs 消失），同时给是配置错误：
+	// 若两个都写，判据会变成「a<=x<=b」这种谁也不想要的东西。
+	if u.MinRatio > 0 && u.MaxRatio > 0 {
+		return fmt.Errorf("plan %q 第 %d 步（%s）%s 的 min_ratio 与 max_ratio 互斥："+
+			"min_ratio 判「目标色出现」，max_ratio 判「目标色消失」，只能给一个",
+			planName, stepNo, stepName, field)
 	}
 	return nil
 }
@@ -317,21 +480,31 @@ func (r *Runner) Run(p *Plan, stop <-chan struct{}) (Stats, error) {
 	if err := p.Validate(); err != nil {
 		return Stats{}, err
 	}
+	r.metrics = metrics{} // 同一 Runner 复用（Loop 之外）时不带入上一轮的数字
+	started := r.now()
 	var st Stats
+	// 用闭包收尾：无论是正常跑完、被 stop 打断，还是中途报错，
+	// 都要把已经发生的耗时/次数写进返回的 Stats——失败时这些数字
+	// 恰恰是最有价值的（P0 要求记录延迟指标）。
+	finish := func(err error) (Stats, error) {
+		r.metrics.applyTo(&st)
+		st.Elapsed = r.now().Sub(started)
+		return st, err
+	}
 	for {
 		for i := range p.Steps {
 			select {
 			case <-stop:
-				return st, nil
+				return finish(nil)
 			default:
 			}
 			if err := r.runStep(&p.Steps[i], &st); err != nil {
-				return st, fmt.Errorf("第 %d 步（%s）: %w", i+1, p.Steps[i].Name, err)
+				return finish(fmt.Errorf("第 %d 步（%s）: %w", i+1, p.Steps[i].Name, err))
 			}
 			st.Steps++
 		}
 		if !p.Loop {
-			return st, nil
+			return finish(nil)
 		}
 	}
 }
@@ -347,6 +520,25 @@ func (r *Runner) runStep(st *Step, stats *Stats) error {
 		label = act.String()
 	}
 
+	// 前置条件（when）：满足才执行本步，不满足则整步跳过。
+	//
+	// 这条判断必须放在「动作解析之后、任何动作发出之前」——守卫的意义就是
+	// 阻止这一次点击，放晚了（比如放进 runLoopStep 里）第一下已经点出去了。
+	if st.When != nil {
+		v, err := r.evalGuard(st.When)
+		if err != nil {
+			// 抓帧失败时「满足/不满足」都不可信。plan 的动作是真实输入，
+			// 猜错就是误操作——宁可报错让调用方停下，也不要在没看到画面时动手。
+			return fmt.Errorf("第 %q 步的前置条件无法判定: %w", label, err)
+		}
+		if !v.satisfied {
+			r.logf("step %s: 前置条件未满足（实测 %.1f%%），跳过本步", label, v.got*100)
+			stats.Skipped++
+			return nil
+		}
+		r.logf("step %s: 前置条件满足（实测 %.1f%%），执行本步", label, v.got*100)
+	}
+
 	// 循环模式：反复执行，每轮立即判定 Until，满足即停。
 	switch {
 	case st.MaxRepeat > 0:
@@ -354,6 +546,30 @@ func (r *Runner) runStep(st *Step, stats *Stats) error {
 	default:
 		return r.runOnceStep(st, act, label, stats)
 	}
+}
+
+// guardVerdict 是守卫判定结果，带实测占比便于日志定位。
+type guardVerdict struct {
+	satisfied bool
+	got       float64
+}
+
+// evalGuard 抓一帧新鲜彩图判定前置条件（when）。
+//
+// 抓帧失败**不静默吞掉**：这时「满足」与「不满足」都不可信，
+// 宁可报错让调用方停下（plan 的唯一动作是真实输入，猜错就是误操作），
+// 也不要在没看到画面的情况下决定「跳过还是执行」。
+func (r *Runner) evalGuard(u *Until) (guardVerdict, error) {
+	cg, ok := r.exec.(ColorGrabber)
+	if !ok {
+		return guardVerdict{}, fmt.Errorf("守卫需要后端支持彩色抓帧（GrabColorFresh），当前后端没有")
+	}
+	img, err := r.grabFresh(cg)
+	if err != nil {
+		return guardVerdict{}, err
+	}
+	got, hit := u.ratioVerdict(img, normRegion(u.Region, img.Bounds()))
+	return guardVerdict{satisfied: hit, got: got}, nil
 }
 
 // runOnceStep 是普通步骤：执行（可 Repeat 次）后按 Until 等待推进。
@@ -374,10 +590,9 @@ func (r *Runner) runOnceStep(st *Step, act agent.Action, label string, stats *St
 		n = 1
 	}
 	for i := 0; i < n; i++ {
-		if err := r.exec.Apply(act); err != nil {
+		if err := r.act(act); err != nil {
 			return err
 		}
-		stats.Actions++
 		if i < n-1 && st.GapMs > 0 {
 			r.sleep(time.Duration(st.GapMs) * time.Millisecond)
 			stats.Waited += time.Duration(st.GapMs) * time.Millisecond
@@ -394,17 +609,58 @@ func (r *Runner) runOnceStep(st *Step, act agent.Action, label string, stats *St
 	}
 
 	ok, d := r.waitUntil(st, base)
-	stats.Waited += d
+	spent := d
+
+	// 超时补偿（on_timeout）：等不到就先补一手，再按同一条件等一轮；
+	// 补了还没等到就再来一轮，最多 CompRetries 轮（默认 1）。
+	//
+	// 为什么是「多轮」而不是「补一次」（2026-09-13 实测）：激励视频的卡法不止
+	// 一种——可能卡在播放层、可能卡在结束页、偶发还会跳去应用商店，单补一次
+	// 只能处理其中一层。用**安全的推进键**（返回键）周期性补偿则必然收敛：
+	//   广告播放层 / 应用详情页 -> 按一下就能关掉回到游戏；
+	//   评审页                 -> 按一下直接跳过评审进结算页；
+	// 两者都朝目标前进，于是「每等一轮按一次」最多几轮就能等到结算页。
+	if !ok && st.OnTimeout != "" {
+		oas, err := parseTimeoutActions(st.OnTimeout)
+		if err != nil {
+			return fmt.Errorf("第 %q 步的 on_timeout 无法解析 %q: %w", label, st.OnTimeout, err)
+		}
+		rounds := st.CompRetries
+		if rounds <= 0 {
+			rounds = 1
+		}
+		for round := 1; round <= rounds && !ok; round++ {
+			r.logf("step %s: 推进条件超时（%.1fs），执行第 %d/%d 轮补偿（%d 个动作）",
+				label, spent.Seconds(), round, rounds, len(oas))
+			for i, oa := range oas {
+				// 补偿动作之间必须留间隔：实测第一个动作（返回键）关掉广告播放层后，
+				// 第二层（Reward granted 结束页）**需要时间渲染出来**，紧接着点的 X
+				// 会落在还没出现的按钮上、点空。900ms 是端到端实测够用的值。
+				if i > 0 {
+					r.sleep(compGap)
+					stats.Waited += compGap
+				}
+				if err := r.act(oa); err != nil {
+					return err
+				}
+			}
+			var d2 time.Duration
+			ok, d2 = r.waitUntil(st, base)
+			spent += d2
+		}
+	}
+
+	stats.Waited += spent
 	if !ok {
 		stats.Timeouts++
 		if st.Strict {
 			return fmt.Errorf("推进条件超时（%s）", describeUntil(st.Until))
 		}
 		r.logf("step %s: %s —— 条件超时，宽松跳过（耗时 %v）",
-			label, act.String(), d.Round(time.Millisecond))
+			label, act.String(), spent.Round(time.Millisecond))
 		return nil
 	}
-	r.logf("step %s: %s —— 条件满足（%v）", label, act.String(), d.Round(time.Millisecond))
+	r.logf("step %s: %s —— 条件满足（%v）", label, act.String(), spent.Round(time.Millisecond))
 	return nil
 }
 
@@ -420,23 +676,26 @@ func (r *Runner) runLoopStep(st *Step, act agent.Action, label string, stats *St
 		gap = st.GapMs
 	}
 	for i := 0; i < st.MaxRepeat; i++ {
-		if err := r.exec.Apply(act); err != nil {
+		if err := r.act(act); err != nil {
 			return err
 		}
-		stats.Actions++
 		// 动作到界面刷新通常需要一点时间，先给一个短间隔再判定，
 		// 否则会把「点击还没生效」误判成「条件未满足」而多点一次。
 		r.sleep(time.Duration(gap) * time.Millisecond)
 		stats.Waited += time.Duration(gap) * time.Millisecond
 
-		ok, err := r.checkOnce(st.Until)
+		ok, got, err := r.checkOnce(st.Until)
 		if err != nil {
 			return err
 		}
 		if ok {
-			r.logf("step %s: %s —— 第 %d 轮命中（%s），停止循环",
-				label, act.String(), i+1, describeUntil(st.Until))
+			r.logf("step %s: %s —— 第 %d 轮命中（%s，实测 %.1f%%），停止循环",
+				label, act.String(), i+1, describeUntil(st.Until), got*100)
 			return nil
+		}
+		if got >= 0 {
+			r.logf("step %s: 第 %d/%d 轮未命中——实测 %.1f%%，%s",
+				label, i+1, st.MaxRepeat, got*100, describeUntil(st.Until))
 		}
 	}
 	// 跑到上限仍未命中：宽松收尾（手游多一轮点击通常无害），并留痕。
@@ -449,38 +708,156 @@ func (r *Runner) runLoopStep(st *Step, act agent.Action, label string, stats *St
 	return nil
 }
 
-// checkOnce 立即判定一次条件（不做超时等待）。
+// parseTimeoutActions 解析 on_timeout 里的补偿动作序列。
+//
+// 支持用 `;`（或换行）分隔多个动作，依次执行——实测关一层广告需要两步
+// （back 关播放层、点 X 关结束页），单一动作覆盖不了。
+// 空段会被忽略，便于档案里排版（如 "A; B" 与 "A;B" 等价）。
+func parseTimeoutActions(s string) ([]agent.Action, error) {
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ';' || r == '\n' || r == '\r'
+	})
+	var out []agent.Action
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		a, err := agent.ParseAction(p)
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", p, err)
+		}
+		out = append(out, a)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("没有可执行的动作")
+	}
+	return out, nil
+}
+
+// grabRetries 是单次判据里抓帧失败的最大尝试次数。
+//
+// 为什么需要（2026-09-13 实测）：安卓 screencap 偶发返回
+// rc=4294967295 / 0 字节（连续 6 次里有 1 次失败），这是**瞬时**故障——
+// 紧接着重试就能成功。若不重试直接把失败当成「条件不满足」，循环会白跑
+// 到上限、等待会白等到超时，且日志上完全看不出是抓帧坏了。
+const grabRetries = 3
+
+// compGap 是 on_timeout 补偿动作之间的间隔。
+//
+// 为什么需要（2026-09-13 实测）：补偿序列 `back; 点广告X` 执行时，
+// 第一个动作关掉广告播放层后，第二层的「Reward granted 结束页」**要几百毫秒
+// 才渲染出来**——紧接着发出的 X 点击落在尚未出现的按钮上，等于点空，
+// 实测整份计划因此仍卡在广告页。留 900ms 后两层都能稳稳清掉。
+const compGap = 900 * time.Millisecond
+
+// grabFresh 抓一帧新鲜彩图，失败时重试若干次。
+//
+// 返回 (nil, err) 表示连续失败——调用方决定是「算未满足」还是「报错」。
+func (r *Runner) grabFresh(cg ColorGrabber) (image.Image, error) {
+	var img image.Image
+	var err error
+	start := r.now()
+	defer func() { r.metrics.grabTime += r.now().Sub(start) }()
+	r.metrics.grabs++
+	for i := 0; i < grabRetries; i++ {
+		img, err = cg.GrabColorFresh()
+		if err == nil && img != nil {
+			return img, nil
+		}
+		if i < grabRetries-1 {
+			r.sleep(150 * time.Millisecond)
+		}
+	}
+	if err == nil {
+		err = fmt.Errorf("抓到的画面为空")
+	}
+	return nil, err
+}
+
+// act 是所有动作的唯一出口：安全检查 -> 真实执行（带重试）-> 记账。
+//
+// 刻意收敛成一个方法而不是在各处直接调 exec.Apply：安全检查、重试和耗时
+// 统计都是「每个动作都必须有」的东西，散在多个调用点必然漏（漏掉的那处
+// 就是安全缺口，或是统计里看不见的耗时）。
+func (r *Runner) act(a agent.Action) error {
+	// 1) §8 安全停止：下发输入前重新确认目标。
+	if sc, ok := r.exec.(SafetyChecker); ok {
+		if err := sc.CheckSafe(); err != nil {
+			return fmt.Errorf("安全检查未通过，停止执行：%w", err)
+		}
+		r.metrics.safetyChecks++
+	}
+
+	// 2) 执行（重试覆盖 ADB input 注入的偶发失败）。
+	start := r.now()
+	var err error
+	for i := 0; i < actRetries; i++ {
+		err = r.exec.Apply(a)
+		if err == nil {
+			break
+		}
+		r.metrics.actionRetries++
+		if i < actRetries-1 {
+			r.logf("⚠️ 动作执行失败（%v），重试 %d/%d", err, i+2, actRetries)
+			r.sleep(200 * time.Millisecond)
+		}
+	}
+	r.metrics.actionTime += r.now().Sub(start)
+	if err != nil {
+		r.metrics.actionErrors++
+		return fmt.Errorf("动作执行失败（连试 %d 次）：%w", actRetries, err)
+	}
+	r.metrics.actions++
+	return nil
+}
+
+// checkOnce 立即判定一次条件（不做超时等待），并返回实测占比。
+//
+// 返回的 got 是「目标色在区域内占了多少」（0~1），-1 表示这次没能测出来
+// （抓帧失败）。调用方把它打进日志——这是「判据为什么没命中」的唯一线索：
+// 没有它时 0.1% 和 3.9% 在日志里长得一模一样，只能靠人肉截图复算。
 //
 // 循环模式下 Validate 已保证条件是 ratio，所以这里只实现 ratio；
 // 其他类型给明确报错而不是静默 false——静默会让「条件永远不满足」
 // 表现为「点到上限才停」，很难查。
-func (r *Runner) checkOnce(u *Until) (bool, error) {
+func (r *Runner) checkOnce(u *Until) (bool, float64, error) {
 	if u.Type != TypeRatio {
-		return false, fmt.Errorf("循环模式只支持 ratio 条件，当前 %q", u.Type)
+		return false, -1, fmt.Errorf("循环模式只支持 ratio 条件，当前 %q", u.Type)
 	}
 	cg, ok := r.exec.(ColorGrabber)
 	if !ok {
-		return false, fmt.Errorf("ratio 条件需要后端支持彩色抓帧（GrabColorFresh），当前后端没有")
+		return false, -1, fmt.Errorf("ratio 条件需要后端支持彩色抓帧（GrabColorFresh），当前后端没有")
 	}
-	img, err := cg.GrabColorFresh()
-	if err != nil || img == nil {
-		return false, nil
+	// 抓帧失败重试后仍失败：按「未满足」处理（宽松，不炸掉整份计划），
+	// 但通过日志留痕——否则这类故障在日志里完全隐形。
+	img, err := r.grabFresh(cg)
+	if err != nil {
+		r.logf("⚠️ 抓帧连续 %d 次失败（%v），本轮判据按未满足处理", grabRetries, err)
+		return false, -1, nil
 	}
 	region := normRegion(u.Region, img.Bounds())
-	return u.ratioSatisfied(img, region), nil
+	got, ok := u.ratioVerdict(img, region)
+	return ok, got, nil
 }
 
-// ratioSatisfied 判定一张彩帧是否满足 ratio 条件。
+// ratioVerdict 判定一张彩帧是否满足 ratio 条件，并返回实测占比。
 //
 // 正向（默认）：目标色占比 >= min_ratio —— 「某 UI 出现了」。
 // 反向（给了 max_ratio）：占比 <= max_ratio —— 「某 UI 消失了」。
 // 两种语义共用一个实现，保证 checkOnce（循环）与 waitUntil（等待）行为一致。
-func (u *Until) ratioSatisfied(img image.Image, region image.Rectangle) bool {
+func (u *Until) ratioVerdict(img image.Image, region image.Rectangle) (float64, bool) {
 	got := colorRatio(img, region, u)
 	if u.MaxRatio > 0 {
-		return got <= u.MaxRatio
+		return got, got <= u.MaxRatio
 	}
-	return got >= u.minRatio()
+	return got, got >= u.minRatio()
+}
+
+// ratioSatisfied 只回答「满足没有」，供不关心实测值的调用方使用。
+func (u *Until) ratioSatisfied(img image.Image, region image.Rectangle) bool {
+	_, ok := u.ratioVerdict(img, region)
+	return ok
 }
 
 // minRatio 返回占比阈值（默认 0.05）。
@@ -571,15 +948,33 @@ func (r *Runner) waitUntil(st *Step, base *image.Gray) (bool, time.Duration) {
 		if !ok {
 			return false, r.now().Sub(start)
 		}
+		// 等待期间按固定间隔把**实测占比**打进日志（默认每 2s 一条），
+		// 并在超时时给出最后观测值。没有它，超时只能看到「条件超时」，
+		// 分不清是「判据差一点」还是「根本测不到」。
+		lastLog := start
+		lastGot := -1.0
 		for {
 			if !r.now().Before(deadline) {
+				if lastGot >= 0 {
+					r.logf("step %s: 条件超时——最后实测 %.1f%%，%s",
+						stepLabel(st), lastGot*100, describeUntil(u))
+				}
 				return false, r.now().Sub(start)
 			}
-			img, err := cg.GrabColorFresh()
+			img, err := r.grabFresh(cg)
 			if err == nil && img != nil {
-				if u.ratioSatisfied(img, normRegion(u.Region, img.Bounds())) {
+				got, hit := u.ratioVerdict(img, normRegion(u.Region, img.Bounds()))
+				lastGot = got
+				if hit {
 					return true, r.now().Sub(start)
 				}
+				if r.now().Sub(lastLog) >= 2*time.Second {
+					r.logf("step %s: 等待中——实测 %.1f%%，%s",
+						stepLabel(st), got*100, describeUntil(u))
+					lastLog = r.now()
+				}
+			} else {
+				r.logf("⚠️ 抓帧连续 %d 次失败（%v），继续轮询", grabRetries, err)
 			}
 			r.sleep(time.Duration(poll) * time.Millisecond)
 		}
@@ -625,6 +1020,20 @@ func (r *Runner) waitUntil(st *Step, base *image.Gray) (bool, time.Duration) {
 		}
 		r.sleep(time.Duration(poll) * time.Millisecond)
 	}
+}
+
+// stepLabel 取步骤的展示名，规则与 runStep 里算 label 时一致。
+//
+// waitUntil 只拿得到 *Step，拿不到 runStep 局部算好的 label；日志里若退化成
+// 打印动作原文，长步骤名会丢，所以这里统一复算一次。
+func stepLabel(st *Step) string {
+	if st.Name != "" {
+		return st.Name
+	}
+	if act, err := agent.ParseAction(st.Action); err == nil {
+		return act.String()
+	}
+	return st.Action
 }
 
 // repeatNote 生成「×N」后缀，单次时为空。

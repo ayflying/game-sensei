@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"errors"
 	"image"
 	"testing"
 	"time"
@@ -462,6 +463,106 @@ func (f *cachedOnlyExec) GrabColorFresh() (image.Image, error) {
 	return f.cached, nil
 }
 
+// countingExec 固定返回一张彩图，并单独统计 Apply 次数。
+//
+// 为什么需要单独计数（而不是复用 fakeExec.acts 的长度）：守卫测试的核心断言是
+// 「一个动作都没发出去」——acts 可能被别处写入，用独立计数器才能锁死这一点。
+type countingExec struct {
+	fakeExec
+	img     image.Image
+	applied int
+}
+
+func (f *countingExec) GrabColorFresh() (image.Image, error) { return f.img, nil }
+
+func (f *countingExec) Apply(a agent.Action) error {
+	f.applied++
+	return f.fakeExec.Apply(a)
+}
+
+// flakyColorExec 模拟安卓 screencap 的**偶发**失败：前 failN 次返回错误，
+// 之后正常返回 frame。
+//
+// 缘起（2026-09-13 真机实测）：对同一界面连抓 6 帧，第 1 次返回
+// rc=4294967295 / 0 字节，随后 5 次全部成功——这是瞬时故障，重试即可恢复。
+// 若不重试，这一次失败会被 checkOnce 当成「条件不满足」，
+// 让整个循环白跑到上限，而日志上看不出任何异常。
+type flakyColorExec struct {
+	fakeExec
+	failN int
+	calls int
+	frame image.Image
+	err   error
+}
+
+func (f *flakyColorExec) GrabColorFresh() (image.Image, error) {
+	f.calls++
+	if f.calls <= f.failN {
+		if f.err != nil {
+			return nil, f.err
+		}
+		return nil, errors.New("screencap 失败（模拟偶发故障）")
+	}
+	return f.frame, nil
+}
+
+// TestRatioRetriesOnTransientGrabFailure 验证「抓帧偶发失败」不会让循环白跑。
+//
+// 场景：目标是「清弹窗直到出现 ADS 红标」，真实画面**第一帧就该命中**，
+// 但抓帧恰好前 2 次失败。有重试时应第 1 轮即停（只按 1 次动作）；
+// 无重试则要按 3 次才命中——这正是修复前会发生的退化。
+func TestRatioRetriesOnTransientGrabFailure(t *testing.T) {
+	f := &flakyColorExec{failN: 2, frame: solid(139, 1, 64)}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:      "清弹窗",
+		Action:    "ACTION PRESS name=close",
+		MaxRepeat: 5,
+		Until: &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5,
+			Region: [4]float64{0, 0, 1, 1}},
+	}}}
+	st, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("不该失败: %v", err)
+	}
+	if st.Timeouts != 0 {
+		t.Errorf("偶发抓帧失败应被重试吃掉，不该记超时；Timeouts=%d", st.Timeouts)
+	}
+	if st.Actions != 1 {
+		t.Errorf("应第 1 轮即命中（只按 1 次），实际按了 %d 次（calls=%d）", st.Actions, f.calls)
+	}
+}
+
+// TestRatioGivesUpOnPersistentGrabFailure 验证「持续抓帧失败」的处理：
+// 重试耗尽后按未满足处理（宽松），循环正常跑满上限并记一次超时，
+// 但**不能**把整份计划炸掉——设备短暂掉线不该让流程崩。
+func TestRatioGivesUpOnPersistentGrabFailure(t *testing.T) {
+	f := &flakyColorExec{failN: 999, frame: solid(139, 1, 64)}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:      "清弹窗",
+		Action:    "ACTION PRESS name=close",
+		MaxRepeat: 4,
+		Until: &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5,
+			Region: [4]float64{0, 0, 1, 1}},
+	}}}
+	st, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("持续抓帧失败不该让计划报错（应宽松收尾）: %v", err)
+	}
+	if st.Actions != 4 {
+		t.Errorf("应跑满 4 轮动作，实际 %d 次", st.Actions)
+	}
+	if st.Timeouts != 1 {
+		t.Errorf("跑满上限应记 1 次超时，实际 %d", st.Timeouts)
+	}
+	// 每轮 1 次 + 重试 (grabRetries-1)，轮数 grabRetries。
+	wantCalls := 4 * grabRetries
+	if f.calls != wantCalls {
+		t.Errorf("抓帧次数 = %d，期望 %d（每轮重试 %d 次）", f.calls, wantCalls, grabRetries)
+	}
+}
+
 // TestColorRatio 验证占比计算与区域裁剪。
 func TestColorRatio(t *testing.T) {
 	img := solid(255, 105, 180)
@@ -534,5 +635,519 @@ func TestValidateRejectsBothRatioBounds(t *testing.T) {
 	}}}
 	if err := p.Validate(); err == nil {
 		t.Error("min_ratio 与 max_ratio 同时给出时应报错")
+	}
+}
+
+// ---- 前置条件 when（2026-09-13 新增，语义＝「满足才执行」）----
+
+// TestWhenSkipsStepWhenPreconditionUnmet 验证前置条件不满足时整步跳过：
+// 不发出任何动作。这是「清残留弹窗」这类步骤的幂等前提。
+//
+// 缘起（真机实测）：plan 顺序执行、无「当前在哪屏」概念，「清弹窗」在已经
+// 干净的主界面上按下去会跳进别的界面（Main -> MY CLOSET），把后面全带偏。
+func TestWhenSkipsStepWhenPreconditionUnmet(t *testing.T) {
+	// 画面没有 ADS 红标：前置条件「ADS 可见」不满足 → 整步跳过、一个动作都不发。
+	f := &countingExec{img: solid(20, 30, 40)}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Action:    "ACTION PRESS name=popup_close",
+		MaxRepeat: 3,
+		GapMs:     1,
+		When: &Until{Type: TypeRatio, Color: [3]int{139, 1, 64},
+			Region: [4]float64{0, 0, 1, 1}, Tolerance: 30, MinRatio: 0.04},
+		Until: &Until{Type: TypeRatio, Color: [3]int{139, 1, 64},
+			Region: [4]float64{0, 0, 1, 1}, Tolerance: 30, MinRatio: 0.04},
+	}}}
+	st, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("不该失败: %v", err)
+	}
+	if f.applied != 0 {
+		t.Errorf("前置条件不满足时应一个动作都不发，实际发了 %d 次", f.applied)
+	}
+	if st.Skipped != 1 {
+		t.Errorf("Skipped 应为 1，实际 %d", st.Skipped)
+	}
+}
+
+// TestWhenRunsStepWhenPreconditionMet 验证前置条件满足时照常执行。
+func TestWhenRunsStepWhenPreconditionMet(t *testing.T) {
+	// 画面有 ADS 红标：前置条件「ADS 可见」满足 → 照常跑满循环。
+	f := &countingExec{img: solid(139, 1, 64)}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Action:    "ACTION PRESS name=popup_close",
+		MaxRepeat: 2,
+		GapMs:     1,
+		When: &Until{Type: TypeRatio, Color: [3]int{139, 1, 64},
+			Region: [4]float64{0, 0, 1, 1}, Tolerance: 30, MinRatio: 0.04},
+		// until 用一个画面里**不存在**的颜色，保证循环不会提前命中、能跑满 2 轮。
+		Until: &Until{Type: TypeRatio, Color: [3]int{110, 93, 236},
+			Region: [4]float64{0, 0, 1, 1}, Tolerance: 20, MinRatio: 0.8},
+	}}}
+	st, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("不该失败: %v", err)
+	}
+	if f.applied != 2 {
+		t.Errorf("前置条件满足时应跑满 2 轮，实际 %d 次", f.applied)
+	}
+	if st.Skipped != 0 {
+		t.Errorf("Skipped 应为 0，实际 %d", st.Skipped)
+	}
+}
+
+// TestWhenPreconditionGatesResultExit 是 2026-09-13 真机踩坑的回归测试。
+//
+// 早期 when 语义写成「满足则跳过」，于是退出步骤写 when=「Exit 可见」就变成了
+// 「结算页在就跳过」——恰好写反。真机日志里表现为「前置条件未满足，执行本步」，
+// 在非结算页照样点了一次 exit_result。改成「满足才执行」后，非结算页必须一次都不点。
+func TestWhenPreconditionGatesResultExit(t *testing.T) {
+	// 不在结算页：区域里没有紫色 Exit 按钮（占比 0% < 80%）。
+	f := &countingExec{img: solid(20, 30, 40)}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Action: "ACTION PRESS name=exit_result",
+		When: &Until{Type: TypeRatio, Color: [3]int{110, 93, 236},
+			Region: [4]float64{0.36, 0.888, 0.64, 0.935}, Tolerance: 20, MinRatio: 0.8},
+		Until: &Until{Type: TypeRatio, Color: [3]int{139, 1, 64},
+			Region: [4]float64{0, 0, 1, 1}, Tolerance: 30, MinRatio: 0.04},
+		TimeoutMs: 1,
+	}}}
+	st, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("不该失败: %v", err)
+	}
+	if f.applied != 0 {
+		t.Errorf("不在结算页时绝不能点 Exit，实际点了 %d 次", f.applied)
+	}
+	if st.Skipped != 1 {
+		t.Errorf("Skipped 应为 1，实际 %d", st.Skipped)
+	}
+}
+
+// TestValidateRejectsNonRatioWhen 验证前置条件只接受 ratio：change 是相对量，
+// 没有基准帧无从判断「画面现在是不是处于这个状态」。
+func TestValidateRejectsNonRatioWhen(t *testing.T) {
+	for _, typ := range []string{TypeChange, TypeStable, TypeTime} {
+		p := &Plan{Steps: []Step{{
+			Action: "ACTION WAIT",
+			When:   &Until{Type: typ},
+		}}}
+		if err := p.Validate(); err == nil {
+			t.Errorf("when.type=%q 应被拒绝", typ)
+		}
+	}
+}
+
+// ---- 安全停止（DEVELOPMENT_PLAN §8）与动作重试（P0）----
+
+// unsafeExec 模拟「安全检查不通过」的后端：CheckSafe 一直返回错误。
+type unsafeExec struct {
+	fakeExec
+	img     image.Image
+	applied int
+}
+
+func (f *unsafeExec) GrabColorFresh() (image.Image, error) { return f.img, nil }
+func (f *unsafeExec) CheckSafe() error                     { return errors.New("目标应用不在前台") }
+func (f *unsafeExec) Apply(a agent.Action) error {
+	f.applied++
+	return nil
+}
+
+// TestSafetyCheckStopsBeforeAnyAction 验证 §8：安全检查不通过时**一个动作都不发**。
+//
+// 这是「先安全后智能」的底线——宁可计划不执行，也不能把输入打到别的应用上。
+func TestSafetyCheckStopsBeforeAnyAction(t *testing.T) {
+	f := &unsafeExec{img: solid(0, 0, 0)}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:      "点一下",
+		Action:    "ACTION PRESS name=x",
+		MaxRepeat: 3,
+		Until:     &Until{Type: TypeRatio, Color: [3]int{1, 2, 3}, MinRatio: 0.5},
+	}}}
+	_, err := r.Run(p, nil)
+	if err == nil {
+		t.Fatal("安全检查不通过时应报错停止，而不是继续跑")
+	}
+	if f.applied != 0 {
+		t.Errorf("安全检查不通过时不该发出任何动作，实际发了 %d 次", f.applied)
+	}
+}
+
+// flakyActionExec 模拟「动作下发偶发失败」：前 failN 次 Apply 返回错误。
+type flakyActionExec struct {
+	fakeExec
+	failN   int
+	calls   int
+	applied int
+}
+
+func (f *flakyActionExec) Apply(a agent.Action) error {
+	f.calls++
+	if f.calls <= f.failN {
+		return errors.New("adb input 注入失败（模拟瞬时故障）")
+	}
+	f.applied++
+	return nil
+}
+
+// TestActionRetriesTransientFailure 验证动作重试：瞬时失败被重试吃掉，计划照常完成。
+//
+// 缘起（P0 任务「增加动作超时/重试」）：ADB input 与 screencap 同源偶发失败，
+// 而 plan 的动作大多是幂等点击，重点一次通常无害；不重试会让一次抖动终止整份计划。
+func TestActionRetriesTransientFailure(t *testing.T) {
+	f := &flakyActionExec{failN: 1}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:   "点一下",
+		Action: "ACTION TAP x=0.5 y=0.5",
+	}}}
+	st, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("瞬时失败应被重试吃掉，不该报错: %v", err)
+	}
+	if st.Actions != 1 {
+		t.Errorf("重试成功后应记 1 个动作，实际 %d", st.Actions)
+	}
+	if st.ActionRetries != 1 {
+		t.Errorf("应记 1 次重试，实际 %d", st.ActionRetries)
+	}
+	if st.ActionErrors != 0 {
+		t.Errorf("重试成功不该记动作失败，实际 %d", st.ActionErrors)
+	}
+}
+
+// TestActionGivesUpAfterPersistentFailure 验证持续失败时如实报错并记失败数。
+func TestActionGivesUpAfterPersistentFailure(t *testing.T) {
+	f := &flakyActionExec{failN: 999}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:   "点一下",
+		Action: "ACTION TAP x=0.5 y=0.5",
+	}}}
+	st, err := r.Run(p, nil)
+	if err == nil {
+		t.Fatal("持续失败应报错")
+	}
+	if st.ActionErrors != 1 {
+		t.Errorf("应记 1 次动作失败，实际 %d", st.ActionErrors)
+	}
+	if f.calls != actRetries {
+		t.Errorf("应连试 %d 次，实际 %d", actRetries, f.calls)
+	}
+}
+
+// TestMetricsCollected 验证 P0 要求的延迟指标确实被采集（端到端/抓帧/动作）。
+func TestMetricsCollected(t *testing.T) {
+	f := &countingExec{img: solid(139, 1, 64)}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:      "清弹窗",
+		Action:    "ACTION PRESS name=close",
+		MaxRepeat: 3,
+		GapMs:     1,
+		Until: &Until{Type: TypeRatio, Color: [3]int{139, 1, 64},
+			Region: [4]float64{0, 0, 1, 1}, MinRatio: 0.04},
+	}}}
+	st, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("不该失败: %v", err)
+	}
+	if st.Grabs == 0 {
+		t.Error("应记录抓帧次数")
+	}
+	if st.Actions == 0 {
+		t.Error("应记录动作数")
+	}
+}
+
+// ---- 超时补偿 on_timeout（2026-09-13 新增）----
+
+// compensatedExec 模拟「等目标界面 -> 超时 -> 补偿动作（返回键）-> 界面出现」：
+// 收到返回键之前返回「不满足色」，之后返回「目标色」。
+//
+// 缘起（真机/模拟器实测的差异）：点 Change 触发激励视频后，真机广告播完自动回游戏，
+// 模拟器无真实广告源、广告 Activity 永久停在屏幕上（实测 45s 不消失）。用返回键
+// 关掉广告是安全的，于是「超时按一下返回键」能把两种环境统一成一条路径。
+type compensatedExec struct {
+	fakeExec
+	applied   []agent.Action
+	satisfied bool
+}
+
+func (f *compensatedExec) GrabColorFresh() (image.Image, error) {
+	if f.satisfied {
+		return solid(139, 1, 64), nil // 目标界面（ADS 红标）已出现
+	}
+	return solid(0, 0, 0), nil // 还卡在广告/加载页
+}
+
+func (f *compensatedExec) Apply(a agent.Action) error {
+	f.applied = append(f.applied, a)
+	if a.Kind == agent.ActionKey {
+		f.satisfied = true // 按了返回键 -> 广告关掉、目标界面露出
+	}
+	return f.fakeExec.Apply(a)
+}
+
+// TestOnTimeoutRunsCompensation 验证超时补偿：第一次等待超时后执行 on_timeout 动作，
+// 再按同一条件重等；补偿生效则本步成功，且补偿动作只发一次（不是反复发）。
+func TestOnTimeoutRunsCompensation(t *testing.T) {
+	f := &compensatedExec{}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:   "等结算页出现（超时按返回键关广告）",
+		Action: "ACTION PRESS name=change",
+		Until: &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5,
+			Region: [4]float64{0, 0, 1, 1}},
+		TimeoutMs: 1,
+		OnTimeout: "ACTION KEY code=back",
+	}}}
+	stats, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("补偿生效后不该报错: %v", err)
+	}
+	if stats.Timeouts != 0 {
+		t.Errorf("补偿生效后不该记超时，实际 %d", stats.Timeouts)
+	}
+	if len(f.applied) != 2 {
+		t.Fatalf("期望 2 个动作（change + back），实际 %d", len(f.applied))
+	}
+	if f.applied[0].Kind != agent.ActionPress {
+		t.Errorf("第一个动作应是 PRESS，实际 kind=%v", f.applied[0].Kind)
+	}
+	if f.applied[1].Kind != agent.ActionKey || f.applied[1].Code != "back" {
+		t.Errorf("第二个动作应是 back 键，实际 kind=%v code=%q", f.applied[1].Kind, f.applied[1].Code)
+	}
+}
+
+// multiActionExec 模拟「背靠背两层广告」：收到 back 键关掉播放层但仍停在结束页，
+// 收到按「关闭」按钮（ActionPress）才真正回到游戏。
+//
+// 缘起（2026-09-13 实测）：模拟器上激励视频卡成两层——播放层 back 可关、
+// 结束后露出的「Reward granted」页只能点右上角 X。单一补偿动作覆盖不了，
+// 所以 on_timeout 支持 `;` 分隔的多个动作。
+type multiActionExec struct {
+	fakeExec
+	applied   []agent.Action
+	satisfied bool
+}
+
+func (f *multiActionExec) GrabColorFresh() (image.Image, error) {
+	if f.satisfied {
+		return solid(139, 1, 64), nil
+	}
+	return solid(0, 0, 0), nil
+}
+
+func (f *multiActionExec) Apply(a agent.Action) error {
+	f.applied = append(f.applied, a)
+	// 只有点「关闭」按钮才关掉结束页；back 只关播放层，不足以让判据成立。
+	if a.Kind == agent.ActionPress && a.Name == "ad_close" {
+		f.satisfied = true
+	}
+	return f.fakeExec.Apply(a)
+}
+
+// TestOnTimeoutRunsMultipleCompensations 验证补偿动作序列按顺序全发出去。
+func TestOnTimeoutRunsMultipleCompensations(t *testing.T) {
+	f := &multiActionExec{}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:      "等结算页（超时先 back 再点关闭）",
+		Action:    "ACTION PRESS name=change",
+		Until:     &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5, Region: [4]float64{0, 0, 1, 1}},
+		TimeoutMs: 1,
+		OnTimeout: "ACTION KEY code=back; ACTION PRESS name=ad_close",
+	}}}
+	stats, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("补偿生效后不该报错: %v", err)
+	}
+	if stats.Timeouts != 0 {
+		t.Errorf("补偿生效后不该记超时，实际 %d", stats.Timeouts)
+	}
+	if len(f.applied) != 3 {
+		t.Fatalf("期望 3 个动作（change + back + ad_close），实际 %d", len(f.applied))
+	}
+	if f.applied[1].Kind != agent.ActionKey || f.applied[1].Code != "back" {
+		t.Errorf("第二个动作应是 back，实际 kind=%v code=%q", f.applied[1].Kind, f.applied[1].Code)
+	}
+	if f.applied[2].Kind != agent.ActionPress || f.applied[2].Name != "ad_close" {
+		t.Errorf("第三个动作应是 PRESS ad_close，实际 kind=%v name=%q", f.applied[2].Kind, f.applied[2].Name)
+	}
+}
+
+// TestOnTimeoutStillLenientWhenCompensationFails 验证补偿也没能等到时，
+// 仍按既定策略宽松跳过并记一次超时（行为与没有 on_timeout 时一致）。
+func TestOnTimeoutStillLenientWhenCompensationFails(t *testing.T) {
+	f := &countingExec{img: solid(0, 0, 0)} // 永远不满足
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:   "等不到就宽松跳过",
+		Action: "ACTION TAP x=0.5 y=0.5",
+		Until: &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5,
+			Region: [4]float64{0, 0, 1, 1}},
+		TimeoutMs: 1,
+		OnTimeout: "ACTION KEY code=back",
+	}}}
+	stats, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("宽松模式不该失败: %v", err)
+	}
+	if stats.Timeouts != 1 {
+		t.Errorf("补偿后仍没等到，应记 1 次超时，实际 %d", stats.Timeouts)
+	}
+	if f.applied != 2 { // 1 次 TAP + 1 次 back
+		t.Errorf("期望 2 个动作（tap + back），实际 %d", f.applied)
+	}
+}
+
+// TestValidateRejectsOnTimeoutWithoutUntil 验证 on_timeout 必须配合 until：
+// 没有 until 就没有超时，补偿动作永远不会触发，属档案写错。
+func TestValidateRejectsOnTimeoutWithoutUntil(t *testing.T) {
+	p := &Plan{Steps: []Step{{
+		Action:    "ACTION TAP x=0.5 y=0.5",
+		OnTimeout: "ACTION KEY code=back",
+	}}}
+	if err := p.Validate(); err == nil {
+		t.Error("有 on_timeout 但无 until，本应报错却通过了")
+	}
+}
+
+// TestValidateRejectsBadOnTimeout 验证 on_timeout 动作本身也要能解析
+// （序列里任一动作非法即报错）。
+func TestValidateRejectsBadOnTimeout(t *testing.T) {
+	p := &Plan{Steps: []Step{{
+		Action:    "ACTION TAP x=0.5 y=0.5",
+		Until:     &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5},
+		OnTimeout: "ACTION FLYAROUND",
+	}}}
+	if err := p.Validate(); err == nil {
+		t.Error("on_timeout 动作无法解析，本应报错却通过了")
+	}
+	// 序列里第二个动作非法也要能查出来。
+	p2 := &Plan{Steps: []Step{{
+		Action:    "ACTION TAP x=0.5 y=0.5",
+		Until:     &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5},
+		OnTimeout: "ACTION KEY code=back; ACTION FLYAROUND",
+	}}}
+	if err := p2.Validate(); err == nil {
+		t.Error("on_timeout 序列中第二个动作非法，本应报错却通过了")
+	}
+}
+
+// stubbornAdExec 模拟「补一次不够、要补三次才关掉的广告」：每收到一个返回键
+// 只向上推进一层，直到第 3 次才让判据成立。
+//
+// 缘起（2026-09-13 实测）：模拟器上的激励视频卡法不止一种——可能卡在播放层、
+// 可能卡在「Reward granted」结束页、偶发还会跳去应用商店详情页。单补一次只能
+// 处理其中一层，必须允许按同一条件多等几轮、每轮补一手。
+type stubbornAdExec struct {
+	fakeExec
+	applied []agent.Action
+	stage   int // 已关掉的广告层数
+}
+
+func (f *stubbornAdExec) GrabColorFresh() (image.Image, error) {
+	if f.stage >= 3 {
+		return solid(139, 1, 64), nil
+	}
+	return solid(0, 0, 0), nil
+}
+
+func (f *stubbornAdExec) Apply(a agent.Action) error {
+	f.applied = append(f.applied, a)
+	if a.Kind == agent.ActionKey && a.Code == "back" {
+		f.stage++
+	}
+	return f.fakeExec.Apply(a)
+}
+
+// TestOnTimeoutCompRetriesConverges 验证多轮补偿：补偿动作在限定轮数内反复执行，
+// 直到判据成立为止，且不会多补（第 3 轮命中后立刻停）。
+func TestOnTimeoutCompRetriesConverges(t *testing.T) {
+	f := &stubbornAdExec{}
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:        "等结算页（广告顽固，最多补 5 轮）",
+		Action:      "ACTION PRESS name=change",
+		Until:       &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5, Region: [4]float64{0, 0, 1, 1}},
+		TimeoutMs:   1,
+		OnTimeout:   "ACTION KEY code=back",
+		CompRetries: 5,
+	}}}
+	stats, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("补偿收敛后不该报错: %v", err)
+	}
+	if stats.Timeouts != 0 {
+		t.Errorf("补偿收敛后不该记超时，实际 %d", stats.Timeouts)
+	}
+	// 1 次 change + 3 次 back
+	if len(f.applied) != 4 {
+		t.Fatalf("期望 4 个动作（change + back×3），实际 %d", len(f.applied))
+	}
+	if f.stage != 3 {
+		t.Errorf("应恰好补 3 轮，实际补了 %d 轮", f.stage)
+	}
+}
+
+// TestOnTimeoutCompRetriesExhausted 验证补满轮数仍未等到时，按宽松策略收尾，
+// 且补偿总次数等于 comp_retries（不多不少）。
+func TestOnTimeoutCompRetriesExhausted(t *testing.T) {
+	f := &countingExec{img: solid(0, 0, 0)} // 永远不满足
+	r := NewRunner(f, noSleep(t))
+	p := &Plan{Steps: []Step{{
+		Name:        "永远等不到（补 2 轮）",
+		Action:      "ACTION TAP x=0.5 y=0.5",
+		Until:       &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5, Region: [4]float64{0, 0, 1, 1}},
+		TimeoutMs:   1,
+		OnTimeout:   "ACTION KEY code=back",
+		CompRetries: 2,
+	}}}
+	stats, err := r.Run(p, nil)
+	if err != nil {
+		t.Fatalf("宽松模式不该失败: %v", err)
+	}
+	if stats.Timeouts != 1 {
+		t.Errorf("补满仍没等到，应记 1 次超时，实际 %d", stats.Timeouts)
+	}
+	// 1 次 TAP + 2 轮 × 1 个 back = 3
+	if f.applied != 3 {
+		t.Errorf("期望 3 个动作（tap + back×2），实际 %d", f.applied)
+	}
+}
+
+// TestValidateRejectsCompRetriesWithoutOnTimeout 验证 comp_retries 必须配合
+// on_timeout：没有补偿动作就没有可重试的东西。
+func TestValidateRejectsCompRetriesWithoutOnTimeout(t *testing.T) {
+	p := &Plan{Steps: []Step{{
+		Action:      "ACTION TAP x=0.5 y=0.5",
+		Until:       &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5},
+		CompRetries: 3,
+	}}}
+	if err := p.Validate(); err == nil {
+		t.Error("有 comp_retries 但无 on_timeout，本应报错却通过了")
+	}
+}
+
+// TestValidateRejectsCompRetriesOutOfRange 验证 comp_retries 的取值范围校验：
+// 写错一个 0 会让一步卡到天亮（轮数 × 超时 = 最长等待）。
+func TestValidateRejectsCompRetriesOutOfRange(t *testing.T) {
+	bad := []int{-1, 21, 999}
+	for _, n := range bad {
+		p := &Plan{Steps: []Step{{
+			Action:      "ACTION TAP x=0.5 y=0.5",
+			Until:       &Until{Type: TypeRatio, Color: [3]int{139, 1, 64}, MinRatio: 0.5},
+			OnTimeout:   "ACTION KEY code=back",
+			CompRetries: n,
+		}}}
+		if err := p.Validate(); err == nil {
+			t.Errorf("comp_retries=%d 越界，本应报错却通过了", n)
+		}
 	}
 }

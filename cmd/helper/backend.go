@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"strings"
 	"time"
 
 	"github.com/ayflying/game-sensei/internal/agent"
@@ -10,6 +11,7 @@ import (
 	"github.com/ayflying/game-sensei/internal/capture"
 	"github.com/ayflying/game-sensei/internal/config"
 	"github.com/ayflying/game-sensei/internal/game"
+	"github.com/ayflying/game-sensei/internal/gamewin"
 	"github.com/ayflying/game-sensei/internal/input"
 )
 
@@ -108,6 +110,9 @@ type pcBackend struct {
 	actuator *input.Actuator
 	// region 非空时：感知与点击都限制在窗口矩形内（屏幕坐标系）。
 	region image.Rectangle
+	// windowKeyword 是游戏窗口标题关键词；非空时 CheckSafe 会在每次动作前
+	// 校验前台窗口仍是它（见 CheckSafe）。空 = 不做前台校验（全屏模式）。
+	windowKeyword string
 	// beforeShot/afterShot 在每次抓屏前后调用（抓屏时隐藏日志浮窗，
 	// 避免 WDA 在 GDI 截屏里留下黑块污染老师/学生的感知）。可为 nil。
 	beforeShot func()
@@ -171,6 +176,33 @@ func (b *pcBackend) Size() (int, int, error) {
 func (b *pcBackend) Describe() string { return "pc（本机 GDI 截屏 + SendInput 键鼠）" }
 
 func (b *pcBackend) Live() bool { return b.actuator.Live }
+
+// CheckSafe 实现 plan.SafetyChecker：PC 端确认「输入会落到游戏窗口」。
+//
+// 两条判据（DEVELOPMENT_PLAN §8）：
+//  1. dry-run 不发真实输入，无需检查；
+//  2. 窗口模式下（有 windowKeyword），前台窗口标题必须仍含该关键词——
+//     否则 SendInput 会打到别的程序上（IDE、浏览器、甚至聊天窗口）。
+//
+// 未配窗口关键词时退化为「不检查」：全屏模式没有可靠的目标判据，
+// 此时检查只会制造假警报。这是已知限制，不是遗漏。
+func (b *pcBackend) CheckSafe() error {
+	if !b.actuator.Live || b.windowKeyword == "" {
+		return nil
+	}
+	if gamewin.ForegroundIsSystemUI() {
+		return fmt.Errorf("前台是锁屏/系统 UI，输入会被吞掉或落到锁屏上")
+	}
+	title := gamewin.ForegroundTitle()
+	if !strings.Contains(strings.ToLower(title), strings.ToLower(b.windowKeyword)) {
+		return fmt.Errorf("前台窗口是 %q，已不含游戏关键词 %q——可能被切到别的程序",
+			title, b.windowKeyword)
+	}
+	return nil
+}
+
+// SetWindowKeyword 记录游戏窗口标题关键词，供 CheckSafe 在每次动作前校验。
+func (b *pcBackend) SetWindowKeyword(kw string) { b.windowKeyword = kw }
 
 // Close 抬起仍按住的键：否则退出后键盘会卡在按下状态。
 func (b *pcBackend) Close() error {
@@ -240,6 +272,43 @@ func (b *adbBackend) Describe() string {
 }
 
 func (b *adbBackend) Live() bool { return b.live }
+
+// CheckSafe 实现 plan.SafetyChecker：安卓端确认「触摸会落到目标应用」。
+//
+// 为什么每次动作前都要查（DEVELOPMENT_PLAN §8「应用不在前台立即停止」）：
+// 手机是「共享前台」的设备——激励广告、系统更新弹窗、锁屏都会把游戏挤到后台。
+// 此时再发 tap，点的是**别的应用**（实测遇到过点「换发型」触发激励广告，
+// 广告把前台切到 Google Play；若那一刻继续按计划点，就会误触商店界面）。
+//
+// 三种放行情形，除此之外一律拦下：
+//  1. dry-run：不发真实输入；
+//  2. 档案没配 package：无从判断目标，退回不检查（已知限制）；
+//  3. 查询报错：**不**放行——连「现在前台是谁」都问不到，说明设备已断连，
+//     按 §8 属于「设备断连」必须停，不能赌它其实没事。
+func (b *adbBackend) CheckSafe() error {
+	if !b.live {
+		return nil
+	}
+	pkg := ""
+	if b.profile != nil {
+		pkg = b.profile.Package
+	}
+	if pkg == "" {
+		return nil
+	}
+	ok, err := b.dev.IsForeground(pkg)
+	if err != nil {
+		return fmt.Errorf("无法确认前台应用（%v）——设备可能已断连", err)
+	}
+	if !ok {
+		cur, cerr := b.dev.Foreground()
+		if cerr != nil || cur == "" {
+			cur = "（查询失败）"
+		}
+		return fmt.Errorf("目标应用 %s 不在前台（当前前台：%s）——输入会落到别的应用上", pkg, cur)
+	}
+	return nil
+}
 
 func (b *adbBackend) Close() error { return nil }
 

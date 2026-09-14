@@ -350,6 +350,9 @@ func main() {
 			// 一小块、学生的降采样观测里游戏只剩噪声；点击也要叠加窗口偏移。
 			// 找到窗口就把三者统一到窗口坐标系（失败不致命，退回全屏模式）。
 			if pcb, ok := be.(*pcBackend); ok {
+				// 记录窗口关键词，供 plan 每次动作前校验前台仍是游戏
+				// （DEVELOPMENT_PLAN §8：应用不在前台立即停止，别把键鼠打到别的程序上）。
+				pcb.SetWindowKeyword(kw)
 				if cr, found := gamewin.ClientRectByTitle(kw); found {
 					pcb.SetWindowRegion(cr)
 					fmt.Printf("感知域: 窗口客户区 %dx%d@(%d,%d)（仅截取游戏画面，点击按窗口坐标换算）\n",
@@ -477,8 +480,19 @@ func main() {
 		}
 		fmt.Printf("计划结束：%d 步 / %d 个动作 / 累计等待 %v / 条件超时 %d 次\n",
 			stats.Steps, stats.Actions, stats.Waited.Round(time.Millisecond), stats.Timeouts)
-		logHook(fmt.Sprintf("计划结束：%d 步 / %d 动作 / 超时 %d 次",
-			stats.Steps, stats.Actions, stats.Timeouts))
+		// 性能指标（DEVELOPMENT_PLAN P0 验收要求「记录截图/推理/动作/端到端延迟」）。
+		// 分开打是因为它们的瓶颈完全不同：安卓抓帧约 0.94s/次，常占总耗时大头；
+		// 动作下发约 0.3~0.6s/次；两者都不是「等待」能解释的。
+		fmt.Printf("性能：端到端 %v / 抓帧 %d 次共 %v / 动作下发 %v / 安全检查 %d 次\n",
+			stats.Elapsed.Round(time.Millisecond), stats.Grabs,
+			stats.GrabTime.Round(time.Millisecond), stats.ActionTime.Round(time.Millisecond),
+			stats.SafetyChecks)
+		if stats.Skipped > 0 || stats.ActionRetries > 0 || stats.ActionErrors > 0 {
+			fmt.Printf("      跳过 %d 步 / 动作重试 %d 次 / 动作失败 %d 次\n",
+				stats.Skipped, stats.ActionRetries, stats.ActionErrors)
+		}
+		logHook(fmt.Sprintf("计划结束：%d 步 / %d 动作 / 超时 %d 次 / 端到端 %v",
+			stats.Steps, stats.Actions, stats.Timeouts, stats.Elapsed.Round(time.Millisecond)))
 		return
 	}
 

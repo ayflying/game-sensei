@@ -21,8 +21,8 @@
     {
       "name": "exit_result",
       "aliases": ["exit", "退出结算"],
-      "pos": [0.5, 0.891],
-      "note": "WINNER/LOSE 结算页底部的紫色 Exit 按钮。回主界面用。"
+      "pos": [0.5, 0.912],
+      "note": "WINNER/LOSE 结算页底部的紫色 Exit 按钮。实测按钮包围盒归一化 [0.353,0.887,0.647,0.936]、中心 (0.5,0.912)；旧值 0.891 落在按钮上缘（圆角处）离边缘仅 6px，已下移到中心。"
     },
     {
       "name": "theme_card",
@@ -35,6 +35,12 @@
       "aliases": ["next", "continue", "继续"],
       "pos": [0.5, 0.9],
       "note": "对话/剧情推进按钮。剧情条数不固定，需配合 plan 的 max_repeat 循环使用。"
+    },
+    {
+      "name": "change",
+      "aliases": ["submit", "提交造型"],
+      "pos": [0.5, 0.91],
+      "note": "关卡盘面（Level N / 地名）底部的白色 Change 按钮：提交当前造型、结束本关。实测点它后播激励广告，广告结束进 WINNER/LOSE 结算页。⚠️ 在模拟器上激励广告会跳 Google Play 卡住（见 hints），真机可正常播完。"
     },
     {
       "name": "next_after_result",
@@ -77,6 +83,18 @@
       "aliases": ["close", "关闭"],
       "pos": [0.85, 0.185],
       "note": "通用弹窗关闭（SALE/活动弹窗右上 ×）。⚠️ 实测 SALE 会多页叠弹、× 逐页漂移，固定坐标单点会漏，必须用 max_repeat 连点。"
+    },
+    {
+      "name": "no_thanks",
+      "aliases": ["skip_ad", "不领取"],
+      "pos": [0.5, 0.97],
+      "note": "结算页「看广告领奖」浮层下方的 No,thanks 文字按钮。⚠️ 实测结算页有**两态**：①WINNER/LOSE + 紫色领奖按钮 + 下方 No,thanks；②点掉 No,thanks 后才露出真正的紫色 Exit。两态的紫色按钮位置几乎重合（都在 0.5,0.912、色 [110,93,236]），ratio 判据区分不了，所以固定先点一次 No,thanks：在①态关掉领奖浮层，在②态该坐标是 Exit 下方空白，无害。"
+    },
+    {
+      "name": "ad_close",
+      "aliases": ["关闭广告", "广告关闭"],
+      "pos": [0.94, 0.043],
+      "note": "激励视频**结束页**（Reward granted）右上角的 X。⚠️ **当前 plan 不使用此按钮**：实测在广告**播放中**点这个坐标会命中「跳转应用商店」热点，把游戏带去 Google Play（该 Activity 挂在游戏包名下，前台检查拦不住）。plan 改用无副作用的返回键 + `comp_retries` 多轮补偿（见 step4）。保留此按钮仅作界面知识记录与人工排查用。"
     }
   ],
   "hints": [
@@ -86,62 +104,113 @@
     "底部物品格分两行，每格左上角粉色心形为收藏标记，左下角 ▶ 表示看广告免费解锁。",
     "⚠️ 对手会同步抄袭玩家装扮并逐个展示（Lucy -> Mamie），进度条落后时会由绿变红。",
     "⚠️ 弹窗会连环自动轮播（SALE 新装、活动），需连点 × 或按返回键清掉。",
-    "⚠️ 冷启动必现 Google Play Games 选账号弹窗，点右下继续跨过。"
+    "⚠️ 冷启动必现 Google Play Games 选账号弹窗，点右下继续跨过。",
+    "完整确定性流程（已实测，见 plan）：主界面点 Win VS -> 主题页点中间卡片 -> 关卡盘面（Level N + 地名）点底部白色 Change -> 播激励广告 -> WINNER/LOSE 结算页 -> 先点一次 No,thanks 关掉领奖浮层 -> 点紫色 Exit -> 回主界面。",
+    "⚠️ 结算页有**两态**：①WINNER/LOSE + 紫色「看广告领奖」按钮 + 下方 No,thanks 文字；②点掉 No,thanks 后才露出真正的紫色 Exit。两态的紫色按钮位置几乎重合（都在 x=0.5 y≈0.912、色 [110,93,236]），ratio 判据区分不了，所以 plan 固定先点一次 No,thanks 再点 Exit。量化区分（同区域同色、容差 20 的实测占比）：领奖浮层态 ≈65%、真 Exit 态 ≈94%，广告/评审/主界面均 0%；故「等结算页出现」用 0.6 阈值（两种态都算到），「确认真 Exit 可点」用 0.8 阈值（只在点掉浮层后成立）。",
+    "⚠️ 关卡盘面的 Change 是「提交造型、结束本关」，不是换装；不点它就永远不会进结算页（早期 plan 误用「等 13s」代替，实测卡在关卡盘面）。",
+    "⚠️ 点 Change 触发的是**激励视频/插屏广告**：真机上广告正常播完自动回游戏；**模拟器无真实广告源**，广告可能卡在播放层、卡在结束页、或跳去应用商店（都不自动消失）。plan 的兜底是**按返回键**（无副作用的通用推进键），超时后最多补 4 轮、每轮重等结算页。⚠️ 绝不要用点广告区域按钮的方式关广告——实测点右上角 X 在广告播放中会命中「跳转应用商店」热点，把游戏带去 Google Play（该 Activity 挂在游戏包名下，前台检查拦不住）。",
+    "⚠️ 返回键（BACK）在各界面的行为（实测）：广告播放层/应用详情页 -> 关掉它们回到游戏；评审页（底部绿/红进度条）-> **跳过评审直接进结算页**；主界面 -> **无副作用**（仍停在主界面）；结算页 -> **会重开一局**（等价于点 replay），**绝不能连按**。结论：BACK 是「广告/评审/主界面」的安全推进键，但「退出回到主界面」必须走紫色 Exit 按钮，不能靠 BACK。",
+    "⚠️ 主题选择页有入场动画，进页面后头几下点击会被吃掉（实测连点 4 次才进关，前 3 次画面完全没变），所以 theme_card 步骤给到 6 轮。",
+    "主题选择页有两种布局变体：有紫色 Start 按钮的、和没有 Start 点中间卡片直接进关的；两者都用 theme_card 位（[0.43,0.66]）点中间卡片即可进关。"
   ],
   "plan": {
-    "name": "端到端：主界面 -> Win VS -> 主题 -> 进关 -> 评审 -> 结算 -> 回主界面",
+    "name": "端到端：主界面 -> Win VS -> 主题 -> 卡片进关 -> Change 提交 -> 结算 -> 回主界面",
     "steps": [
       {
-        "name": "清残留弹窗（SALE 多页叠弹，连点关闭直到露出主界面的 ADS 红标）",
+        "name": "清残留弹窗（SALE 多页叠弹），直到露出主界面左上角 ADS 红标。前置条件=ADS 红标不可见（幂等：主界面已干净就整步跳过，避免误点跳进 MY CLOSET）",
         "action": "ACTION PRESS name=popup_close",
         "max_repeat": 6,
         "gap_ms": 1600,
+        "when": {
+          "type": "ratio",
+          "region": [0.05, 0.235, 0.155, 0.295],
+          "color": [139, 1, 64],
+          "tolerance": 30,
+          "max_ratio": 0.04
+        },
         "until": {
           "type": "ratio",
           "region": [0.05, 0.235, 0.155, 0.295],
           "color": [139, 1, 64],
-          "tolerance": 50,
-          "min_ratio": 0.06
+          "tolerance": 30,
+          "min_ratio": 0.04
         },
         "strict": false
       },
       {
-        "name": "点 Win VS 进主题选择",
+        "name": "点 Win VS 进主题选择页（判据=主题页票券条出现）",
         "action": "ACTION PRESS name=win_vs",
         "until": {
           "type": "ratio",
-          "region": [0.0, 0.76, 1.0, 0.82],
-          "color": [110, 93, 236],
-          "tolerance": 40,
-          "min_ratio": 0.03
+          "region": [0.33, 0.442, 0.67, 0.468],
+          "color": [85, 92, 107],
+          "tolerance": 25,
+          "min_ratio": 0.35
         },
-        "timeout_ms": 6000
+        "timeout_ms": 8000
       },
       {
-        "name": "进关（幂等）：点 Start 位；有 Start 的变体直接生效，无 Start 的变体此处即主题卡片位",
-        "action": "ACTION PRESS name=start",
-        "max_repeat": 3,
+        "name": "点主题卡片进关（幂等，最多 6 轮）：前置条件=主题页票券条可见；判「票券条消失」——不依赖落到哪个关卡场景。实测主题页有入场动画，头几下点击会被吃掉，故给到 6 轮",
+        "action": "ACTION PRESS name=theme_card",
+        "max_repeat": 6,
         "gap_ms": 2500,
+        "when": {
+          "type": "ratio",
+          "region": [0.33, 0.442, 0.67, 0.468],
+          "color": [85, 92, 107],
+          "tolerance": 25,
+          "min_ratio": 0.1
+        },
         "until": {
           "type": "ratio",
-          "region": [0.0, 0.84, 1.0, 0.95],
-          "color": [255, 255, 255],
-          "tolerance": 10,
-          "min_ratio": 0.15
+          "region": [0.33, 0.442, 0.67, 0.468],
+          "color": [85, 92, 107],
+          "tolerance": 25,
+          "max_ratio": 0.1
         },
         "strict": false
       },
       {
-        "name": "结算收尾：点 Exit 回主界面",
+        "name": "点 Change 提交造型（触发激励广告）：只点一次，然后等结算页紫色按钮出现（阈值 0.6 覆盖结算页两态——领奖浮层≈65%、真 Exit≈94%；广告/评审/主界面均 0%）。超时（模拟器无真实广告源、广告卡死）则**按返回键**推进并重等，最多 4 轮——返回键是无副作用的通用推进键（广告播放层/应用详情页可关、评审页等于跳过评审直接进结算），真机广告自行播完时补偿不触发。⚠️ 不用点广告区域的方式关广告：实测点右上角 X 在广告播放中会命中「跳转应用商店」热点，把游戏带去 Google Play，且该 Activity 挂在游戏包名下、前台检查拦不住",
+        "action": "ACTION PRESS name=change",
+        "until": {
+          "type": "ratio",
+          "region": [0.36, 0.888, 0.64, 0.935],
+          "color": [110, 93, 236],
+          "tolerance": 20,
+          "min_ratio": 0.6
+        },
+        "timeout_ms": 20000,
+        "on_timeout": "ACTION KEY code=back",
+        "comp_retries": 4,
+        "strict": false
+      },
+      {
+        "name": "结算页两态兼容：先点一次 No,thanks。有「看广告领奖」浮层时关掉它（否则紫色领奖按钮会顶替 Exit）；没有浮层时该坐标是 Exit 下方空白，无害",
+        "action": "ACTION PRESS name=no_thanks",
+        "until": {
+          "type": "time",
+          "ms": 1200
+        }
+      },
+      {
+        "name": "点 Exit 回主界面（前置条件=结算页紫色 Exit 可见才点；判 ADS 红标重新出现）",
         "action": "ACTION PRESS name=exit_result",
+        "when": {
+          "type": "ratio",
+          "region": [0.36, 0.888, 0.64, 0.935],
+          "color": [110, 93, 236],
+          "tolerance": 20,
+          "min_ratio": 0.8
+        },
         "until": {
           "type": "ratio",
           "region": [0.05, 0.235, 0.155, 0.295],
           "color": [139, 1, 64],
-          "tolerance": 50,
-          "min_ratio": 0.06
+          "tolerance": 30,
+          "min_ratio": 0.04
         },
-        "strict": false
+        "timeout_ms": 15000
       }
     ]
   }
