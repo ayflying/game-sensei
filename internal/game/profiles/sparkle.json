@@ -113,6 +113,12 @@
       "aliases": ["关闭广告", "广告关闭"],
       "pos": [0.94, 0.043],
       "note": "激励视频**结束页**（Reward granted）右上角的 X。⚠️ **当前 plan 不使用此按钮**：实测在广告**播放中**点这个坐标会命中「跳转应用商店」热点，把游戏带去 Google Play（该 Activity 挂在游戏包名下，前台检查拦不住）。plan 改用无副作用的返回键 + `comp_retries` 多轮补偿（见 step4）。保留此按钮仅作界面知识记录与人工排查用。"
+    },
+    {
+      "name": "popup_close_alt",
+      "aliases": ["close2", "评分弹窗关闭"],
+      "pos": [0.828, 0.328],
+      "note": "**居中弹窗**（5 星评分 / 活动弹窗）右上角的 ×。⚠️ 与 SALE 弹窗的 ×（popup_close [0.85,0.185]）不是同一个位置，用 SALE 的坐标点不到它（实测 run44 因此卡死在评分弹窗上）。⚠️ 该类弹窗带**全屏暗化遮罩**，会把主界面左上角的 ADS 红标压暗（(139,1,64) → 约 (97,1,45)，色差 ≈46 超出 tol 30），导致「ADS 红标」判据实测 0.0%——所以主界面判据在弹窗态会失灵，必须先用本按钮清掉弹窗。实测主界面上该点是右侧竖排图标上方的空白，误点无害。"
     }
   ],
   "hints": [
@@ -138,10 +144,8 @@
     "name": "端到端：主界面 -> Win VS -> 主题 -> 卡片进关 -> Change 提交 -> 结算 -> 回主界面",
     "steps": [
       {
-        "name": "清残留弹窗（SALE 多页叠弹），直到露出主界面左上角 ADS 红标。前置条件=ADS 红标不可见（幂等：主界面已干净就整步跳过，避免误点跳进 MY CLOSET）",
+        "name": "清残留弹窗（SALE 多页叠弹 / 居中评分·活动弹窗）：两种 × 位置交替点，直到露出主界面左上角**未被暗化**的 ADS 红标。前置条件=ADS 红标不可见（幂等：主界面已干净就整步跳过，避免误点跳进 MY CLOSET）。⚠️ 居中弹窗的 × 与 SALE 的不同位置，故 on_timeout 用两个动作交替（`popup_close_alt; popup_close`）",
         "action": "ACTION PRESS name=popup_close",
-        "max_repeat": 6,
-        "gap_ms": 1600,
         "when": {
           "type": "ratio",
           "region": [0.05, 0.235, 0.155, 0.295],
@@ -156,6 +160,9 @@
           "tolerance": 30,
           "min_ratio": 0.04
         },
+        "timeout_ms": 2000,
+        "on_timeout": "ACTION PRESS name=popup_close_alt; ACTION PRESS name=popup_close",
+        "comp_retries": 4,
         "strict": false
       },
       {
@@ -171,9 +178,9 @@
         "timeout_ms": 8000
       },
       {
-        "name": "点主题卡片选中关卡场景（幂等，最多 3 轮）：前置条件=主题页票券条可见；判「票券条消失」（点已选中卡会直接进关）。⚠️ 实测主题页有两种交互：①点未选中的场景卡=仅选中并露出紫色 Start；②点已选中的场景卡=直接进关。连点同一张卡**不会取消选中**（实测点 3 次票券条恒在、Start 恒在），故重试安全",
+        "name": "点主题卡片选中关卡场景（幂等，只点 1 次）：⚠️ 实测（run41）点 3 轮画面毫无变化——变体①点卡只「选中」、票券条恒在（62.6%），3 轮全未命中白等约 8s，进关实际由下一步的紫色 Start 完成；变体②点卡直接进关、票券条随即消失，1 次即够。故 max_repeat 由 3 收到 1。前置条件=主题页票券条可见；判「票券条消失」",
         "action": "ACTION PRESS name=theme_card",
-        "max_repeat": 3,
+        "max_repeat": 1,
         "gap_ms": 1800,
         "when": {
           "type": "ratio",
@@ -286,7 +293,7 @@
         "strict": false
       },
       {
-        "name": "等结算页出现（兜住「点服装卡后游戏自行推进」这条路径）：实测点 1~2 张服装卡后盘面会自行消失、直接进入评审页，此时上面的 Change 步会被 when 守卫跳过，必须靠本步把评审/广告/过关动画等过渡态等过去。判据=结算页紫色按钮 ≥60%；超时则按返回键推进（评审页按 BACK = 跳过评审直接进结算）并重等，最多 4 轮。宽松跳过——真没进结算页时由下一步的胜负判定步（strict）兜底失败",
+        "name": "等结算页出现（兜住「点服装卡后游戏自行推进」这条路径）：实测点 1~2 张服装卡后盘面会自行消失、直接进入评审页，此时上面的 Change 步会被 when 守卫跳过，必须靠本步把评审/广告/过关动画等过渡态等过去。判据=结算页紫色按钮 ≥60%；超时则按返回键推进（评审页按 BACK = 跳过评审直接进结算）并重等，最多 6 轮。⚠️ timeout 已从 25s 收到 5s：实测（run41）同一画面下紫色判据连续 86s 恒为 0.0%（模拟器广告卡死、画面不会自行变化），每轮 25s 纯属白等——该步一度占全局耗时 74%；缩短后让 BACK 更早介入，实测 3 轮即进结算页（86s -> 约 20s）。宽松跳过——真没进结算页时由下一步的胜负判定步（strict）兜底失败",
         "action": "ACTION WAIT",
         "until": {
           "type": "ratio",
@@ -295,9 +302,9 @@
           "tolerance": 20,
           "min_ratio": 0.6
         },
-        "timeout_ms": 25000,
+        "timeout_ms": 5000,
         "on_timeout": "ACTION KEY code=back",
-        "comp_retries": 4,
+        "comp_retries": 6,
         "strict": false
       },
       {
@@ -322,24 +329,24 @@
         "strict": true
       },
       {
-        "name": "点 Exit 回主界面。能走到这里必是 WINNER（上一步已用顶部大字判据把败局拦掉），故不再需要 when 守卫；判 ADS 红标重新出现。⚠️ 别靠返回键退出：结算页按 BACK 会重开一局",
+        "name": "点 Exit 回主界面。能走到这里必是 WINNER（上一步已用顶部大字判据把败局拦掉），故不再需要 when 守卫。⚠️ 判据=「结算页紫色 Exit 消失」（max_ratio 0.1），**不是**「ADS 红标出现」——实测（run42）胜局点 Exit 后随机弹的 SALE 弹窗会盖住 ADS，用 ADS 判据时本步连续 4 轮判 0.0%、空等 48.9s；改用「Exit 消失」后与弹窗无关，1~2s 即命中，弹窗交给下一步清理。⚠️ 别靠返回键退出：结算页按 BACK 会重开一局",
         "action": "ACTION PRESS name=exit_result",
         "until": {
           "type": "ratio",
-          "region": [0.05, 0.235, 0.155, 0.295],
-          "color": [139, 1, 64],
-          "tolerance": 30,
-          "min_ratio": 0.04
+          "region": [0.36, 0.888, 0.64, 0.935],
+          "color": [110, 93, 236],
+          "tolerance": 20,
+          "max_ratio": 0.1
         },
-        "timeout_ms": 12000,
+        "timeout_ms": 5000,
         "on_timeout": "ACTION PRESS name=exit_result",
-        "comp_retries": 3,
+        "comp_retries": 4,
         "strict": false
       },
       {
-        "name": "胜局回主界面兜底：若胜局点 Exit 后被 SALE 弹窗挡住（ADS 红标不可见）则连点右上 × 清掉，直到露出主界面。前置条件=ADS 红标不可见（幂等：已干净回到主界面就整步跳过）。⚠️ 实测胜局点 Exit 后会随机弹全屏 SALE 弹窗，10 轮跑批里 4 局胜、只有 1 局顺利回到主界面，其余卡在弹窗上（这正是判据②「胜利 ∧ 终态正确」里终态不达标的主因）。⚠️ 别用点广告区域按钮的方式关弹窗（会跳应用商店）",
-        "action": "ACTION PRESS name=popup_close",
-        "max_repeat": 6,
+        "name": "胜局回主界面兜底：点 Exit 后常被「全屏 SALE 弹窗」或「Google 广告 Activity」挡住（ADS 红标不可见）。前置条件=ADS 红标不可见（幂等：已干净回到主界面就整步跳过）。⚠️ 动作改用**返回键**而非点 popup_close——实测（run43）点 Exit 后画面停在 com.google.android.gms.ads.AdActivity（本模拟器**有真实 AdMob 广告**），此时点右上 × 可能命中广告跳转热点（会跳应用商店）；返回键在广告页=关广告、在主界面=无副作用，是唯一安全的通用推进键（本步执行时已离开结算页，不会触发「结算页 BACK 重开一局」）",
+        "action": "ACTION KEY code=back",
+        "max_repeat": 8,
         "gap_ms": 1600,
         "when": {
           "type": "ratio",
