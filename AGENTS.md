@@ -66,7 +66,10 @@
 ## 1. 动工前必读
 
 - `DEVELOPMENT_PLAN.md` —— 主约束文档，含 AI 执行总规则（先理解后修改 / 小步变更 / 不覆盖用户工作：**不得 reset、checkout、clean 或删除探测产物** / 完成后闭环）。
-- `README.md` —— 定位、架构、安装、命令、操作手册；**已确认功能的接口、参数、实测数据、限制，必须同步更新 README**（当前到 §11，§9.3 是双后端说明）。
+- `README.md` —— **只放项目介绍**（定位 / 自学习闭环 / 角色 / 技术栈 / 目录结构 / 路线图 / 设计决策 / 合规）+ §9 文档索引。
+- `docs/` —— **正文分册**（原 README 的三大块）：`quickstart` / `backends` / `action-layer` / `teacher-demo-video` / `cgo-free` / `runtime-notes` / `student-training` / `nrc-field-notes` / `plan-engine` / `plan-sparkle` / `reference`。
+  **分册里的章节编号沿用原 README 编号**（如 `docs/plan-engine.md` 里是 `12.1`~`12.5`），所以「README §11.16」这类旧引用按 [README §9 文档索引](README.md#9-文档索引) 对应到文件即可。
+  **已确认功能的接口、参数、实测数据、限制，必须同步更新对应文档。**
 - `outputs/game-sensei-学习能力开发计划.md` —— 只看学习路线图（P0/P1/P2）时读它。
 
 ---
