@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ayflying/game-sensei/internal/agent"
+	"github.com/ayflying/game-sensei/internal/plan"
 )
 
 func TestLoad_内置档案(t *testing.T) {
@@ -50,6 +51,47 @@ func TestLoad_nrc档案内容(t *testing.T) {
 	}
 	if len(p.Hints) == 0 {
 		t.Error("nrc 档案应带有界面先验")
+	}
+}
+
+// Sparkle 档案带着一份端到端 plan，步骤最多、字段最全（when/on_timeout/
+// comp_retries/strict）。它必须能过 Profile.Load 的 plan 校验——否则真机跑
+// `-plan` 会在加载阶段就报错。这条测试守住「档案 JSON 手改后仍然合法」。
+func TestLoad_sparkle档案与plan校验(t *testing.T) {
+	p, err := Load("sparkle")
+	if err != nil {
+		t.Fatalf("加载 sparkle 档案失败: %v", err)
+	}
+	if p.Package != "com.yoyaworld.sparkle" {
+		t.Errorf("Package = %q", p.Package)
+	}
+	if p.Plan == nil {
+		t.Fatal("sparkle 档案应带 plan")
+	}
+	if len(p.Plan.Steps) == 0 {
+		t.Fatal("plan 没有任何步骤")
+	}
+	// 胜负判定步：必须是「只等不动 + ratio 顶部大字判据 + strict」。
+	// 这是把「输了却判 PASS」堵住的关键——用紫色 Exit 判据区分不了胜负
+	// （WINNER/LOSE 都是 93.7%），只有顶部大字（WINNER=紫蓝、LOSE=银白）能区分。
+	var verdict *plan.Step
+	for i := range p.Plan.Steps {
+		st := &p.Plan.Steps[i]
+		// 顶部大字判据的识别特征：region 上沿落在标题区（≈0.08）。
+		if st.Until != nil && st.Until.Type == "ratio" &&
+			len(st.Until.Region) == 4 && approx(st.Until.Region[1], 0.08) {
+			verdict = st
+			break
+		}
+	}
+	if verdict == nil {
+		t.Fatal("plan 里找不到「顶部大字」胜负判定步（region 上沿 ≈0.08）")
+	}
+	if verdict.Action != "ACTION WAIT" {
+		t.Errorf("胜负判定步必须只等不动（ACTION WAIT），当前 %q —— 否则会误点结算页", verdict.Action)
+	}
+	if !verdict.Strict {
+		t.Error("胜负判定步必须 strict=true，否则败局会被宽松跳过、退出码仍为 0")
 	}
 }
 
