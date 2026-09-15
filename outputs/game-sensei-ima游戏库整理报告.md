@@ -162,3 +162,43 @@
 2. `解忧梦幻岛-新手种田与经营攻略.md` 仍需安酱在 App 建同名文件夹后移入。
 3. 命名前缀仍不统一（`洛克王国-` vs `洛克王国：世界-`），MCP 无改名能力。
 
+---
+
+## 八、2026-09-15 复核 + YoYa Star 归档
+
+- 复核方式：逐夹列举，**逐条读 `parent_folder_id` 自行分组**（不采信 `file_number` / `total_size`）
+- 结果：根目录 **0 个散落文件** ✅；`game-sensei` 8 条、`洛克王国：世界` 9 条、`Sparkle` 4 条
+
+### 1. 新增入库
+
+| 项 | 内容 |
+|---|---|
+| 文档 | `YoYa Star-实测笔记与问题记录.md`（12,616 B） |
+| media_id | `markdown_…_fcc643e0223504766e8f2a5e98cd808d7504129723208370` |
+| 核验 | `media_state=2` / `parse_progress=100` / `file_size=12616` ✅ |
+| 内容 | YoYa Star 启动流程 + 直播换装界面坐标 + 教学卡点证据链 + **Bug 清单（BUG×3 / ENV×3 / MIS×3 / GAP×2）** |
+| 本地原文 | `.workbuddy/ima-uploads/YoYa Star-实测笔记与问题记录.md`（恢复底本） |
+
+⚠️ **落点**：`YoYa Star` 文件夹当时尚未创建（**MCP 无建夹能力**），09:41 先**暂存 `game-sensei` 夹过渡**；
+安酱 **09:44 在 App 建好「Yoya Star」夹**（`folder_7505441466620084`）后，**10:28 已用
+`add_knowledge(media_id=<上表>, folder_id=folder_7505441466620084)` 一次移入并核验**
+（`parent_folder_id` 已指向新夹）——**移动永不传 `DUPLICATE_NAME_STRATEGY_REPLACE`**（会自删，见 §七红线）。
+
+### 2. ⚠️ 新发现：列表接口会混入兄弟文件夹条目
+
+`get_knowledge_list` 传 `folder_id` 时，**返回结果不止目标文件夹的条目**：
+查 `game-sensei` 返回 12 条，其中 **5 条的 `parent_folder_id` 指向「洛克王国：世界」**；
+且返回体里的 `total_size` 与本夹实际条目数不符（`game-sensei` 标 12、实际本条 7）。
+
+⇒ **核验口径**：只能「逐条读 `parent_folder_id` 后自行分组」，**任何计数都不作依据**
+（此前只发现 `file_number` 不可信，现在扩展到 `total_size` 与 folder 过滤本身）。
+
+### 3. 待办与进展
+
+1. ~~建 `YoYa Star` 文件夹~~ → **✅ 09:44 安酱已建「Yoya Star」夹，10:28 我已把笔记移入并核验**
+2. `解忧梦幻岛` 文件夹待建 → 建好后把《解忧梦幻岛-新手种田与经营攻略》移入
+3. 查 ima 回收站是否有《洛克王国-战斗能量与聚能机制》（§七 事故丢失，无本地原文）
+
+> 核对「条目在不在」的正确姿势：**不要看文件夹计数**（`file_number` / `total_size` / 传 `folder_id`
+> 的过滤全都不可信）。正确做法是**按标题在列举结果里找到那条，再读它的 `parent_folder_id`** ——
+> 这次就是靠这一步确认条目确实早已入库、只是暂存在 `game-sensei` 夹。
