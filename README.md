@@ -182,6 +182,7 @@ game-sensei/
 | [`docs/plan-engine.md`](docs/plan-engine.md) | §12 前言、§12.1~§12.5 | `-plan` 动机、用法、档案格式、实测数据与坑、测试覆盖 |
 | [`docs/plan-sparkle.md`](docs/plan-sparkle.md) | §12.6~§12.10 | Sparkle 实战：胜负判定、装备与胜率、跑批实测、远程 ADB、假成功翻案 |
 | [`docs/plan-yoyastar.md`](docs/plan-yoyastar.md) | §12.11~§12.16 | YoYa Star 实战：结算页拒输入、五个判据标定、**广告色块致假判负的事故复盘**、跑批口径、离线设计验证矩阵、**主界面全入口与玩法覆盖清单** |
+| [`docs/dressup-template.md`](docs/dressup-template.md) | §13 | 换装类通用玩法模板 `profiles/dressup_common.json`：14 步 PK 主循环骨架、五段结构、判据默认值表、新游戏复用流程 |
 | [`docs/reference.md`](docs/reference.md) | §10 | 参考链接 |
 
 仓库根的其他文档：`AGENTS.md`（AI 协作须知）、`DEVELOPMENT_PLAN.md`（主约束与路线图）、
