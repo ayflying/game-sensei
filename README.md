@@ -185,7 +185,7 @@ game-sensei/
 | [`docs/reference.md`](docs/reference.md) | §10 | 参考链接 |
 
 仓库根的其他文档：`AGENTS.md`（AI 协作须知）、`DEVELOPMENT_PLAN.md`（主约束与路线图）、
-`outputs/`（任务书、报告与知识库）。
+`outputs/`（任务书、报告与知识库；换装类新游戏上手照 `outputs/游戏类型-换装类上手手册.md` 的 SOP 七步执行）。
 
 **想直接跑起来** → [`docs/quickstart.md`](docs/quickstart.md) 与
 [`docs/action-layer.md`](docs/action-layer.md)（加新游戏只写一份 JSON 档案）。
