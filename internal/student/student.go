@@ -60,8 +60,9 @@ type weightsFile struct {
 // Net 是加载好的学生网络。
 type Net struct {
 	hidden int
+	inC    int // 输入通道数：1=灰度（旧）、3=RGB 彩色（2026-09-16 起）
 
-	conv1W []float32 // [8,1,3,3]
+	conv1W []float32 // [8,inC,3,3]
 	conv1B []float32 // [8]
 	conv2W []float32 // [16,8,3,3]
 	conv2B []float32
@@ -101,8 +102,19 @@ func Load(path string) (*Net, error) {
 	w := f.Weights
 	n := &Net{hidden: f.Arch.Hidden}
 	n.meta.valAcc = f.Meta.ValAcc
+	// 输入通道数由 conv1_w 形状自然携带：[8,inC,3,3]。旧权重是 8*1*9=72，
+	// 彩色权重是 8*3*9=216——不额外约定 meta 字段，避免两处不一致。
+	c1n := len(w["conv1_w"])
+	if c1n%72 != 0 {
+		return nil, fmt.Errorf("conv1_w 长度 %d 不是 8*inC*9 的整数倍（inC ∈ {1,3}）", c1n)
+	}
+	inC := c1n / 72
+	if inC != 1 && inC != 3 {
+		return nil, fmt.Errorf("conv1_w 推导出 inC=%d，只支持 1（灰度）或 3（RGB）", inC)
+	}
+	n.inC = inC
 	need := map[string]int{
-		"conv1_w": 8 * 1 * 9, "conv1_b": 8,
+		"conv1_w": 8 * inC * 9, "conv1_b": 8,
 		"conv2_w": 16 * 8 * 9, "conv2_b": 16,
 		"conv3_w": 24 * 16 * 9, "conv3_b": 24,
 		"fc_w": f.Arch.Hidden * 24, "fc_b": f.Arch.Hidden,
@@ -171,13 +183,39 @@ func validateClasses(got []string) error {
 // Meta 返回训练时的验证准确率（用于日志展示）。
 func (n *Net) MetaValAcc() float64 { return n.meta.valAcc }
 
+// InChannels 返回输入通道数（1=灰度，3=RGB）。调用方据此决定用 DecideImage
+// 还是（仅 1 通道时）灰度入口 Decide。
+func (n *Net) InChannels() int { return n.inC }
+
 // Decide 实现 agent.Actor（本包不 import agent，避免依赖环——见 Adapter）。
 // 输入任意尺寸灰度帧：内部居中裁剪到 64:48 再最近邻缩放到 64x48（与训练一致）。
 func (n *Net) Decide(frame *image.Gray) (Action, error) {
 	if frame == nil || frame.Bounds().Dx() == 0 {
 		return Action{}, nil
 	}
-	x := preprocess(frame)
+	// 彩色模型必须走 DecideImage：灰度图只有 1 个通道，喂给 3 通道 conv1
+	// 会读到越界/错位的输入（不报错但决策全错）。这里显式挡掉。
+	if n.inC != 1 {
+		return Action{}, fmt.Errorf("这是 %d 通道模型，灰度入口不可用：请用 DecideImage 传彩色帧", n.inC)
+	}
+	return n.decide(preprocess(frame))
+}
+
+// DecideImage 是通道自适应的主入口（2026-09-16 起，彩色模型上线后的推荐入口）：
+// inC==1 时把帧灰度化走旧路径，inC==3 时用 RGB 三通道预处理。
+// 灰度模型（旧权重）在这里的行为与 Decide 完全一致。
+func (n *Net) DecideImage(img image.Image) (Action, error) {
+	if img == nil || img.Bounds().Dx() == 0 {
+		return Action{}, nil
+	}
+	if n.inC == 1 {
+		return n.decide(preprocess(toGray(img)))
+	}
+	return n.decide(preprocessRGB(img))
+}
+
+// decide 是「预处理已就绪」的公共后半段：前向 + argmax + 坐标。
+func (n *Net) decide(x []float32) (Action, error) {
 	logits, coords := n.forward(x)
 	// argmax
 	best, bi := logits[0], 0
@@ -187,6 +225,18 @@ func (n *Net) Decide(frame *image.Gray) (Action, error) {
 		}
 	}
 	return Action{Class: Classes[bi], X: float64(coords[0]), Y: float64(coords[1])}, nil
+}
+
+// toGray 把任意图像转灰（配合 inC==1 模型；与旧 stucheck 的内联转换等价）。
+func toGray(img image.Image) *image.Gray {
+	b := img.Bounds()
+	g := image.NewGray(b)
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			g.Set(x, y, img.At(x, y))
+		}
+	}
+	return g
 }
 
 // Action 是学生的原始输出（类别 + 坐标）。
@@ -204,8 +254,8 @@ func (n *Net) ForwardRaw(x []float32) (logits, coords []float32) {
 
 // forward 是纯 Go 前向传播，布局与 train.py 逐层一致。
 func (n *Net) forward(x []float32) (logits, coords []float32) {
-	// conv1: [1,48,64] -> [8,46,62]
-	c1 := conv3x3(x, 1, InH, InW, n.conv1W, n.conv1B, 8)
+	// conv1: [inC,48,64] -> [8,46,62]（inC=1 灰度 / 3 RGB）
+	c1 := conv3x3(x, n.inC, InH, InW, n.conv1W, n.conv1B, 8)
 	relu(c1)
 	p1 := maxpool2(c1, 8, 46, 62) // [8,23,31]
 
@@ -295,6 +345,42 @@ func preprocess(frame *image.Gray) []float32 {
 		for x := 0; x < InW; x++ {
 			srcX := sx + x*sw/InW
 			out[dst+x] = float32(frame.Pix[row+srcX]) / 255.0
+		}
+	}
+	return out
+}
+
+// preprocessRGB 把任意彩色帧转成 [3*48*64] 的输入向量（R 平面→G 平面→B 平面，
+// 与 conv3x3 的 ic*inH*inW 通道优先布局一致）。裁剪/缩放几何与 preprocess 完全相同
+// ——唯一区别是每像素取 RGB 三值而非灰度单值。数值路径对齐 train.py 的
+// PIL convert("RGB") + transpose(2,0,1)：/255 后按 [3,H,W] 平铺。
+func preprocessRGB(img image.Image) []float32 {
+	b := img.Bounds()
+	W, H := b.Dx(), b.Dy()
+	var sx, sy, sw, sh int
+	if float64(W)/float64(H) > float64(InW)/float64(InH) {
+		sh = H
+		sw = H * InW / InH
+		sx = (W - sw) / 2
+		sy = 0
+	} else {
+		sw = W
+		sh = W * InH / InW
+		sx = 0
+		sy = (H - sh) / 2
+	}
+
+	plane := InH * InW
+	out := make([]float32, 3*plane)
+	for y := 0; y < InH; y++ {
+		srcY := sy + y*sh/InH
+		dst := y * InW
+		for x := 0; x < InW; x++ {
+			srcX := sx + x*sw/InW
+			r, g, bb, _ := img.At(b.Min.X+srcX, b.Min.Y+srcY).RGBA()
+			out[dst+x] = float32(r>>8) / 255.0
+			out[plane+dst+x] = float32(g>>8) / 255.0
+			out[2*plane+dst+x] = float32(bb>>8) / 255.0
 		}
 	}
 	return out

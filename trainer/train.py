@@ -66,10 +66,11 @@ assert len(CLASS_WEIGHTS) == len(CLS), "CLASS_WEIGHTS 长度必须与 CLS 一致
 # 数据：读取 demo 数据集
 # ---------------------------------------------------------------------------
 
-def load_demos(data_dir: Path, recursive: bool) -> tuple[list[dict], dict]:
+def load_demos(data_dir: Path, recursive: bool, rgb: bool = False) -> tuple[list[dict], dict]:
     """读一个或多个示范目录，返回 (样本列表, 普查统计)。
 
-    每个样本 = {"frame": float32[down_h,down_w] 0~1, "cls": int, "x": float, "y": float}
+    每个样本 = {"frame": float32[C,H,W]（rgb）或 [H,W]（灰度）, "cls": int,
+                "x": float, "y": float, "pref": str(局级 label)}
 
     另返回 stats 供**类别普查**使用（见 main 的空类检查）：
       - raw_kinds: 原始 kind 计数（none/move/press...）
@@ -109,8 +110,10 @@ def load_demos(data_dir: Path, recursive: bool) -> tuple[list[dict], dict]:
                 if kind is None:
                     dropped[str(s.get("kind", ""))] += 1
                     continue
-                img = Image.open(frame_path).convert("L")
+                img = Image.open(frame_path).convert("RGB" if rgb else "L")
                 arr = center_crop_resize(img, 64, 48)
+                if rgb:
+                    arr = np.transpose(arr, (2, 0, 1))  # [H,W,3] -> [3,H,W]
                 samples.append({"frame": arr, "cls": CLS.index(kind), "x": x, "y": y,
                                 "pref": s.get("label") or ""})
                 mapped[kind] += 1
@@ -212,9 +215,16 @@ def dir_of(dx: float, dy: float) -> str:
 
 
 def center_crop_resize(img, w: int, h: int) -> np.ndarray:
-    """居中裁剪到目标长宽比再缩放——竖屏/横屏画面落到同一坐标系（通用性关键）。"""
+    """居中裁剪到目标长宽比再缩放——竖屏/横屏画面落到同一坐标系（通用性关键）。
+
+    ⚠️ 重采样**必须显式 NEAREST**，与 Go 侧 internal/student/preprocess 的最近邻
+    逐像素对齐（2026-09-16 实测：PIL resize 省略 resample 时对 RGB/L 默认 BICUBIC，
+    与 Go 的 NEAREST 是**训练/推理预处理错配**——边界帧的 logits 会翻转，
+    如 v6 的 pick01：BICUBIC 判 none(4.99/4.87) vs NEAREST 判 tap(5.24/5.49)）。
+    """
     W, H = img.size
     target_ratio = w / h
+    from PIL import Image  # 延迟导入与 load_demos 一致（torch/PIL 不做顶层依赖）
     if W / H > target_ratio:
         nw = int(H * target_ratio)
         x0 = (W - nw) // 2
@@ -223,7 +233,7 @@ def center_crop_resize(img, w: int, h: int) -> np.ndarray:
         nh = int(W / target_ratio)
         y0 = (H - nh) // 2
         img = img.crop((0, y0, W, y0 + nh))
-    img = img.resize((w, h))
+    img = img.resize((w, h), Image.NEAREST)
     return np.asarray(img, dtype=np.float32) / 255.0
 
 
@@ -231,18 +241,18 @@ def center_crop_resize(img, w: int, h: int) -> np.ndarray:
 # 网络定义（结构必须与 Go 侧 internal/student 前向完全一致）
 # ---------------------------------------------------------------------------
 
-def build_model(hidden: int = 64):
+def build_model(hidden: int = 64, in_ch: int = 1):
     import torch
     import torch.nn as nn
 
     class StudentNet(nn.Module):
-        """conv1(1->8,3x3)+relu+pool2 -> conv2(8->16,3x3)+relu+pool2
+        """conv1(in_ch->8,3x3)+relu+pool2 -> conv2(8->16,3x3)+relu+pool2
         -> conv3(16->24,3x3)+relu+GAP -> fc(24->hidden)+relu
         -> cls_head(hidden->8) / coord_head(hidden->2)+sigmoid"""
 
         def __init__(self):
             super().__init__()
-            self.conv1 = nn.Conv2d(1, 8, 3)
+            self.conv1 = nn.Conv2d(in_ch, 8, 3)
             self.conv2 = nn.Conv2d(8, 16, 3)
             self.conv3 = nn.Conv2d(16, 24, 3)
             self.fc = nn.Linear(24, hidden)
@@ -324,9 +334,14 @@ def import_weights_json(path: Path, hidden: int) -> tuple[dict, dict]:
     if arch.get("classes") and list(arch["classes"]) != CLS:
         sys.exit("--init 权重的类别顺序与当前 CLS 不一致，拒绝加载")
 
-    # JSON 键名 -> (state_dict 键名, 形状)，与 export_weights 的导出顺序一一对应
+    # JSON 键名 -> (state_dict 键名, 形状)，与 export_weights 的导出顺序一一对应。
+    # 输入通道数由 conv1_w 长度自然携带（72=灰度 / 216=RGB），与 Go 侧 Load 同一约定。
+    c1_len = len((doc.get("weights") or {}).get("conv1_w") or [])
+    if c1_len not in (72, 216):
+        sys.exit(f"--init conv1_w 长度 {c1_len} 无法推导输入通道（支持 72=1ch / 216=3ch）")
+    in_ch = c1_len // 72
     shapes = {
-        "conv1_w": ("conv1.weight", (8, 1, 3, 3)), "conv1_b": ("conv1.bias", (8,)),
+        "conv1_w": ("conv1.weight", (8, in_ch, 3, 3)), "conv1_b": ("conv1.bias", (8,)),
         "conv2_w": ("conv2.weight", (16, 8, 3, 3)), "conv2_b": ("conv2.bias", (16,)),
         "conv3_w": ("conv3.weight", (24, 16, 3, 3)), "conv3_b": ("conv3.bias", (24,)),
         "fc_w": ("fc.weight", (hidden, 24)), "fc_b": ("fc.bias", (hidden,)),
@@ -476,6 +491,12 @@ def main() -> None:
                     help="按示范行的局级 label 加权样本，格式 LABEL=value 逗号分隔（如 WIN=1.0,FAIL=0.3）。"
                          "离线偏好学习：胜局动作示范加权、败局示范降权。未列出的 label 与缺省行权重 1.0。"
                          "不传该参数时行为与旧版完全一致。")
+    ap.add_argument("--coord-only", action="store_true",
+                    help="只训坐标回归：跳过分类损失（分类头不训练），选优看 val 坐标误差最小。"
+                         "用于「场景识别由外部像素判据负责、学生只出坐标」的工作模式（2026-09-16 v5 起）。")
+    ap.add_argument("--rgb", action="store_true",
+                    help="三通道彩色输入（conv1 in_channels=3，采集帧需为 RGB）。"
+                         "权重文件由 conv1_w 形状自然携带通道数（[8,3,3,3] vs [8,1,3,3]）。")
     ap.add_argument("--val-frac", type=float, default=0.2,
                     help="分层切分的验证集比例（按类别内比例取，每类至少留 1 条在训练集）")
     args = ap.parse_args()
@@ -483,7 +504,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    samples, stats = load_demos(Path(args.data), args.recursive)
+    samples, stats = load_demos(Path(args.data), args.recursive, rgb=args.rgb)
 
     # 类别普查 + 空类检查（默认拒绝训练），再做分层切分。
     label_counts = [0] * len(CLS)
@@ -502,7 +523,8 @@ def main() -> None:
     print(f"  分层切分: {len(tr_idx)} 训练 / {n_val} 验证（val_frac={args.val_frac}）")
 
     frames = torch.tensor(np.stack([samples[i]["frame"] for i in range(len(samples))]))
-    frames = frames.unsqueeze(1)  # [N,1,H,W]
+    if not args.rgb:
+        frames = frames.unsqueeze(1)  # 灰度 [N,H,W] -> [N,1,H,W]；RGB 已是 [N,3,H,W]
     cls = torch.tensor([samples[i]["cls"] for i in range(len(samples))], dtype=torch.long)
     xy = torch.tensor([[samples[i]["x"], samples[i]["y"]] for i in range(len(samples))],
                       dtype=torch.float32)
@@ -539,7 +561,7 @@ def main() -> None:
         print("  偏好加权: " + ", ".join(f"{k}={v:g}" for k, v in pw_map.items())
               + " | 样本分布: " + ", ".join(f"{k}={n}" for k, n in sorted(n_by_label.items())))
 
-    model = build_model(args.hidden)
+    model = build_model(args.hidden, in_ch=3 if args.rgb else 1)
     parent_meta: dict = {}
     if args.init:
         sd, parent_meta = import_weights_json(Path(args.init), args.hidden)
@@ -562,10 +584,12 @@ def main() -> None:
     val_majority = max(Counter(val_truth).values()) / len(val_truth)
     print(f"  多数类基线 {val_majority:.2%}（val_acc 不高于它，说明模型只是在猜最多数的类）")
 
-    print(f"\n训练: {len(tr_idx)} 训练 / {n_val} 验证 | {args.epochs} epochs")
+    print(f"\n训练: {len(tr_idx)} 训练 / {n_val} 验证 | {args.epochs} epochs"
+          + ("  [coord-only：只训坐标回归]" if args.coord_only else ""))
     best_acc = 0.0
     best_state = None
     final_acc = 0.0
+    best_coord_err = float("inf")
     for ep in range(args.epochs):
         model.train()
         perm = torch.randperm(len(tr_idx))
@@ -574,8 +598,11 @@ def main() -> None:
             bi = perm[b0:b0 + args.batch]
             logits, coords = model(frames[bi])
             # 逐样本加权（类权重 × 偏好权重），按权重和归一 ⇒ 等价于旧的加权平均语义
-            l_cls_vec = nn.functional.cross_entropy(logits, cls[bi], weight=cls_w, reduction="none")
-            l_cls = (l_cls_vec * pref_w[bi]).sum() / pref_w[bi].sum().clamp_min(1e-8)
+            if args.coord_only:
+                l_cls = torch.tensor(0.0)  # 只训坐标：分类头与 cls 损失完全隔离
+            else:
+                l_cls_vec = nn.functional.cross_entropy(logits, cls[bi], weight=cls_w, reduction="none")
+                l_cls = (l_cls_vec * pref_w[bi]).sum() / pref_w[bi].sum().clamp_min(1e-8)
             if xy_mask[bi].sum() > 0:
                 lc = coord_loss_fn(coords, xy[bi]).mean(dim=1)
                 w = xy_mask[bi] * pref_w[bi]
@@ -606,7 +633,12 @@ def main() -> None:
                                 == cls[tr_idx]).float().mean())
             print(f"  epoch {ep+1:3d}  loss={total_loss/len(tr_idx):.4f}  "
                   f"train_acc={tr_acc:.2%}  val_acc={acc:.2%}  tap坐标误差={coord_err:.3f}")
-        if acc >= best_acc:
+        if args.coord_only:
+            # coord-only 时分类头无训练信号，val_acc 无意义 ⇒ 按 val 坐标误差最小选优
+            if coord_err < best_coord_err:
+                best_coord_err = coord_err
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        elif acc >= best_acc:
             best_acc = acc
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
 
@@ -619,9 +651,13 @@ def main() -> None:
         val_pred = model(frames[val_idx])[0].argmax(dim=1).tolist()
     recall, pred_dist = per_class_report(val_truth, val_pred)
 
-    print(f"\n选优 val_acc={best_acc:.2%}（{args.epochs} epoch 里的最大值，"
-          f"受 {n_val} 样本粒度影响，偏乐观）")
-    print(f"末轮 val_acc={final_acc:.2%}   多数类基线={val_majority:.2%}")
+    if args.coord_only:
+        print(f"\n选优：val 坐标误差 ={best_coord_err:.4f}（{args.epochs} epoch 里的最小值）")
+        print(f"末轮 val_acc={final_acc:.2%}（coord-only：分类头无训练信号，仅作参考）")
+    else:
+        print(f"\n选优 val_acc={best_acc:.2%}（{args.epochs} epoch 里的最大值，"
+              f"受 {n_val} 样本粒度影响，偏乐观）")
+        print(f"末轮 val_acc={final_acc:.2%}   多数类基线={val_majority:.2%}")
     print(f"验证集预测分布: {pred_dist}")
     print("各类召回（验证集）:")
     for name, r in recall.items():
@@ -630,6 +666,8 @@ def main() -> None:
     meta = {
         "trained_on": str(Path(args.data).resolve()),
         "samples": len(samples),
+        "coord_only": bool(args.coord_only),
+        "rgb": bool(args.rgb),
         "val_acc": round(best_acc, 4),
         "val_acc_final": round(final_acc, 4),
         "val_majority_baseline": round(val_majority, 4),
@@ -642,6 +680,8 @@ def main() -> None:
         # 别把它当能力指标：真正的门槛是「显著高于多数类基线 + 各类召回非零」。
         "val_acc_note": "best-over-epochs on a tiny val split; optimistic. "
                         "需显著高于 val_majority_baseline 且各类召回非零，才算有决策能力。",
+        "coord_search": "选优依据：coord_only 时=val 坐标误差最小；否则=val_acc 最大。",
+        "val_coord_err": round(best_coord_err, 4) if args.coord_only else None,
         "down_w": 64,
         "down_h": 48,
         "trained_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
