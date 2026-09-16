@@ -44,12 +44,28 @@
     { "name": "star", "aliases": ["星形", "交互"], "pos": [0.80, 0.81],
       "note": "右下角最大的圆形按钮。坐标实测，功能未完全核验" }
   ],
-  "hints": ["横屏 3D 开放世界；左下角圆形区域是虚拟摇杆，中心约 x=0.21 y=0.69"]
+  "hints": ["★两种界面必须先分清：大世界是摇杆+动作钮；回合战斗是底部一横排圆钮……"],
+  "hints_world":  ["左下角圆形区域是虚拟摇杆，中心约 x=0.21 y=0.69"],  // 只在 world 态注入
+  "hints_battle": ["能量机制：每回合回能，出招需先攒够能量"]                 // 只在 battle 态注入
 }
 ```
 
-`hints` 会**逐条拼进老师提示词**，`buttons` 决定 `ACTION PRESS` 的合法取值，
-`move` 决定 `MOVE` 怎么落地。
+`hints` / `hints_world` / `hints_battle` 都是**逐条拼进老师提示词**的界面先验，
+按当前界面态取「通用 + 该态专属」注入（`world` → `hints`+`hints_world`；
+`battle` → `hints`+`hints_battle`；判不出态时按 `world` 处理，与按钮/宏的 `state` 语义一致）：
+
+- **为什么要分**：nrc 档案 18 条先验共 2291 字符，其中战斗专属 1404 字符（61%）。
+  不分层时大世界态要白背 61% 的无效先验；分层后 world 态 887 字符、battle 态 1376 字符
+  （2026-09-16 实测，`-print-protocol`）。
+- **两态都要用的判据**（「两种界面必须先分清」「战斗态禁止 MOVE」等）写进 `hints` 通用桶。
+- **容量门禁**（加载时报错，`normalizeHints`）：单条 ≤ 500 字符、单态注入合计 ≤ 4000 字符。
+- **自检**：`go run ./cmd/helper -game nrc -print-protocol` 打印两态下的完整动作协议
+  与先验条数/字符数——不开 demo、不碰设备，改完档案先看它。
+
+注入决策侧另配**两段式防护**（`ActionProtocol`）：先验「仅用于辨认画面元素，不要把这些
+说法直接当作结论」，且动作名只能取【可用动作】列表——防模型把先验当答案（见 §9.4 的实测）。
+
+`buttons` 决定 `ACTION PRESS` 的合法取值，`move` 决定 `MOVE` 怎么落地。
 
 ---
 
@@ -64,6 +80,9 @@
 ```bash
 # 看看有哪些档案（也可直接读 internal/game/profiles/*.json）
 go run ./cmd/helper -game 不存在的名字      # 报错里会列出全部可用档案
+
+# 档案自检：打印两态动作协议与分层先验条数/字符数（不碰设备、不调模型）
+go run ./cmd/helper -game nrc -print-protocol
 
 # 用手游档案跑在线示范
 go run ./cmd/helper -target android -serial <sn> -game nrc \
@@ -206,7 +225,7 @@ go run ./cmd/helper -game pc_generic -frames 100
   老师看不到它们，只能通过宏使用。
 - **按钮与宏带界面态标签**（`world` / `battle`）：`ProtocolOptionsForState` 在战斗态
   只列战斗项并**关掉 `MOVE`**；`PressNamesForState` 供复读兜底**按态轮换**，绝不跨态。
-- `main.go` 启动时会打印宏清单与「界面态可否自动判定」，一眼看出档案是否生效。
+- `main.go` 启动时会打印宏清单、「界面态可否自动判定」与三桶先验条数分布，一眼看出档案是否生效。
 
 ---
 
@@ -253,6 +272,9 @@ adb shell settings put global stay_on_while_plugged_in 7   # 充电时保持常�
 
 ### 当前状态与未验证项（诚实记录）
 
+- ✅ **已验证**：先验按界面态分层（2026-09-16）——nrc 档案 `hints` 4 + `hints_world` 6 +
+  `hints_battle` 6；`-print-protocol` 实测 world 10 条/887 字符、battle 10 条/1376 字符，
+  world 段零战斗条目、battle 段零大世界条目；回归基线 `jieyou`/`mobile_generic` 零影响。
 - ✅ **已验证**：档案加载与校验、L1→L2 展开（含边界夹紧、斜向等长、错误路径）、
   两端后端的键名映射与坐标换算、端到端契约
   （同一句 `ACTION MOVE dir=前` → 手游推摇杆 / PC 按住 `W`）、

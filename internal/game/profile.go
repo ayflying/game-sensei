@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ayflying/game-sensei/internal/plan"
 )
@@ -139,8 +140,21 @@ type Profile struct {
 	// 这个状态，只会复读第一步（实测 2026-09-12：连续点 battle_skill 却从不点卡）。
 	// 把状态机收进档案，模型的决策退化成一次「放哪个技能」的短列表选择。
 	Macros []Macro `json:"macros,omitempty"`
-	// Hints 额外的界面先验，逐条拼进老师提示词。
+	// Hints 额外的界面先验，逐条拼进老师提示词。**两态通用**（典型内容：界面态判据本身）。
 	Hints []string `json:"hints,omitempty"`
+	// HintsWorld / HintsBattle 按界面态细分的先验：只在对应态注入。
+	//
+	// 为什么必须分：先验是直接拼进提示词的，而老师本就要在 num_predict>=1500 的预算里
+	// 完成思考。实测 nrc 档案 18 条 hints 共 2291 字符，其中战斗专属 1404 字符（61%）、
+	// 大世界专属 614 字符；两态通用只有 273 字符。不分层时，大世界态要多背 1404 字符的
+	// 无效先验（占 61%），分层后降到 887 字符。
+	//
+	// 语义与按钮/宏的 State 完全一致（见 PressNamesForState）：
+	//   - world  态 → Hints + HintsWorld
+	//   - battle 态 → Hints + HintsBattle
+	//   - 未知（""）→ 按 world 处理（与 ProtocolOptionsForState 现有约定一致）
+	HintsWorld  []string `json:"hints_world,omitempty"`
+	HintsBattle []string `json:"hints_battle,omitempty"`
 	// BattleDetect 可选的「回合战斗态」像素判据（移植自 tools/detect_state.py 实测逻辑）。
 	// 配了之后回路能只靠灰度帧判断当前是大世界还是战斗，从而在战斗态禁止 MOVE、
 	// 卡死时不推摇杆、复读兜底只在战斗按钮里轮换。不配则这些按态保护全部关闭。
@@ -584,6 +598,11 @@ func (p *Profile) normalize() error {
 			return fmt.Errorf("battle_detect 的 tol_x/tol_y 过大（%.3f/%.3f）；超过按钮间距的一半会互相串位", tolX, tolY)
 		}
 	}
+
+	// 先验容量门禁：超限在加载时报错，防止档案被改胖后静默挤占提示词预算。
+	if err := p.normalizeHints(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -600,6 +619,52 @@ func normalizeState(s string) string {
 	default:
 		return stateInvalid
 	}
+}
+
+// 先验容量门禁。取值依据：现网最大档案 nrc 分层 + 瘦身后 world 887 字符、
+// battle 1376 字符（分层后未瘦身时 battle 为 1677），单条最长 340 字符。
+// 上限取「现有档案全过、再涨一倍就报错」的量级，
+// 确保门禁先卡住「线性膨胀」，而不是一上来就否掉现有档案。
+const (
+	maxHintsTotalChars = 4000 // 单态注入（通用 + 该态）的字符上限
+	maxHintChars       = 500  // 单条先验的字符上限
+)
+
+// normalizeHints 逐条 trim 并执行容量门禁。
+// 与按钮/宏的 state 校验同一原则：档案写错要在加载时报出来，不许静默退化。
+func (p *Profile) normalizeHints() error {
+	groups := []struct {
+		field string
+		items *[]string
+	}{
+		{"hints", &p.Hints},
+		{"hints_world", &p.HintsWorld},
+		{"hints_battle", &p.HintsBattle},
+	}
+	for _, g := range groups {
+		for i := range *g.items {
+			s := strings.TrimSpace((*g.items)[i])
+			(*g.items)[i] = s
+			if s == "" {
+				return fmt.Errorf("%s[%d] 是空条目（先验逐条进提示词，空条只是白占位置）", g.field, i)
+			}
+			if n := utf8.RuneCountInString(s); n > maxHintChars {
+				return fmt.Errorf("%s[%d] 长 %d 字符，超过单条上限 %d——先验直接进提示词，太长会挤掉思考预算（请精简为可观测判据，或拆成多条）",
+					g.field, i, n, maxHintChars)
+			}
+		}
+	}
+	for _, st := range []string{StateWorld, StateBattle} {
+		n := 0
+		for _, s := range p.HintsForState(st) {
+			n += utf8.RuneCountInString(s)
+		}
+		if n > maxHintsTotalChars {
+			return fmt.Errorf("%s 态先验合计 %d 字符，超过上限 %d（请拆到 hints_world/hints_battle，或把数值/概率类内容移出先验）",
+				st, n, maxHintsTotalChars)
+		}
+	}
+	return nil
 }
 
 func inUnitRange(v float64) bool { return v >= 0 && v <= 1 }
@@ -763,6 +828,24 @@ func (p *Profile) PressNamesForState(state string) []string {
 		if !m.Hidden && ok(m.State) {
 			out = append(out, m.Name)
 		}
+	}
+	return out
+}
+
+// HintsForState 返回某界面态下应注入老师的全部先验（通用 + 该态专属）。
+//
+// 未知态（""）按 world 处理，与 ProtocolOptionsForState / PressNamesForState 的既有
+// 约定一致：宁可多给大世界先验，也不要因为判不出战斗态就什么都不给。
+func (p *Profile) HintsForState(state string) []string {
+	if p == nil {
+		return nil
+	}
+	out := make([]string, 0, len(p.Hints)+len(p.HintsWorld)+len(p.HintsBattle))
+	out = append(out, p.Hints...)
+	if normalizeState(state) == StateBattle {
+		out = append(out, p.HintsBattle...)
+	} else {
+		out = append(out, p.HintsWorld...)
 	}
 	return out
 }

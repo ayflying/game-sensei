@@ -458,12 +458,21 @@ func ActionProtocol(o ProtocolOptions) string {
 	var b strings.Builder
 
 	if len(o.Hints) > 0 {
-		b.WriteString("【界面先验】\n")
+		b.WriteString("【界面先验】（仅用于辨认画面元素，不要把这些说法直接当作结论）\n")
 		for _, h := range o.Hints {
 			b.WriteString("- ")
 			b.WriteString(h)
 			b.WriteString("\n")
 		}
+		// 与 internal/video/annotate.go 同一套两段式防护。原因见该处注释：
+		// 档案先验里写了「点任务追踪文字可以自动寻路」后，8 段判读里有 6 段照搬这一句。
+		// 决策侧的表现形式不同（模型不是复述、而是照做），但根因相同：模型把先验当答案。
+		//
+		// ⚠️ 措辞必须只压「把先验里的画面描述当动作」，不能否定先验里出现的合法动作名：
+		// 分层后的 battle 先验里有 5 条直接写了 PRESS name=cast_xxx / gather_energy / cancel_aim，
+		// 那是刻意的动作空间说明；若被一起压掉，老师会退回「连点技能钮」的老毛病。
+		b.WriteString("以上先验只用来认画面：要执行动作时，动作名只能取下面【可用动作】里列出的那些，")
+		b.WriteString("并依据当前这张画面判断该用哪一个；不要把先验里的描述直接当成动作执行。\n")
 	}
 
 	b.WriteString("\n【可用动作】每条一行，只输出一行：\n")

@@ -41,6 +41,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ayflying/game-sensei/internal/agent"
 	"github.com/ayflying/game-sensei/internal/config"
@@ -103,7 +104,14 @@ func printProfile(p *game.Profile) {
 	if p.CanDetectBattle() {
 		fmt.Println("  界面态: 可自动判定（大世界 / 回合战斗）")
 	}
-	fmt.Printf("  界面先验: %d 条\n", len(p.Hints))
+	// 先验按界面态分层（通用/大世界/战斗三桶）。此处只报桶分布，
+	// 逐态注入后的完整清单与字符数用 -print-protocol 查看。
+	if lw, lb := len(p.HintsWorld), len(p.HintsBattle); lw+lb > 0 {
+		fmt.Printf("  界面先验: %d 条（通用 %d / 大世界 %d / 战斗 %d）\n",
+			len(p.Hints)+lw+lb, len(p.Hints), lw, lb)
+	} else {
+		fmt.Printf("  界面先验: %d 条\n", len(p.Hints))
+	}
 }
 
 // macroStepsSummary 汇总宏的步数区间，形如「2~2 步」。
@@ -169,6 +177,10 @@ func main() {
 	// ---- 确定性计划执行（把已学会的流程固化：零模型、零推理成本）----
 	planMode := flag.Bool("plan", false,
 		"执行档案里的 plan 段：按固定步骤序列跑，用画面反馈推进，全程不调用老师模型（省钱提速）")
+
+	// ---- 档案自检：打印最终动作协议（不初始化后端、不截屏、不送审）----
+	printProtocol := flag.Bool("print-protocol", false,
+		"打印该档案在 world/battle 两态下的完整动作协议（含界面先验）后退出。用于核验档案先验是否按态正确注入")
 
 	flag.StringVar(&cfg.Target, "target", cfg.Target, "控制目标：pc（本机键鼠）| android（ADB 遥控手机）")
 	flag.StringVar(&cfg.ADBPath, "adb", cfg.ADBPath, "adb 可执行文件路径（空=自动查找）")
@@ -286,11 +298,32 @@ func main() {
 		}
 		prof = p
 		printProfile(p)
+		// 档案自检：打印最终协议后直接退出（此时后端尚未初始化，无资源可泄漏）。
+		// 放在档案加载块内：没有档案就没有协议可打印。
+		if *printProtocol {
+			for _, st := range []string{game.StateWorld, game.StateBattle} {
+				// 档案没配 battle_detect 时判不出战斗态，只打 world 一份就够了。
+				if st == game.StateBattle && !p.CanDetectBattle() {
+					continue
+				}
+				o := p.ProtocolOptionsForState(st)
+				n := 0
+				for _, h := range o.Hints {
+					n += utf8.RuneCountInString(h)
+				}
+				fmt.Printf("\n===== 界面态 %s（先验 %d 条 / %d 字符）=====\n", st, len(o.Hints), n)
+				fmt.Println(agent.ActionProtocol(o))
+			}
+			return
+		}
 		// 档案带了包名而用户没显式指定 -app 时直接采用：少一处要记的配置
 		if cfg.AppPackage == "" {
 			cfg.AppPackage = p.Package
 		}
 	} else {
+		if *printProtocol {
+			log.Fatalf("-print-protocol 需要 -game 指定档案（如 -game nrc）")
+		}
 		fmt.Println("未指定游戏档案（-game）：只能做 TAP/SWIPE/HOLD/KEY/WAIT，")
 		fmt.Printf("  MOVE/PRESS 会明确报错。内置档案：%s\n", strings.Join(game.Names(), "、"))
 	}

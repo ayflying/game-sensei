@@ -695,4 +695,48 @@ func (p *Profile) normalizeHints() error {
   （资料对策略头是间接作用，对老师是直接作用）。
 - T2 依赖的界面态能力来自 `internal/game/profile.go` 的 `state` 机制与
   `internal/game/detect.go` 的战斗判据，**不新增架构**。
-- 本任务书为**待执行方案**，尚未修改任何代码；由执行会话按 §四 顺序实施，每步对照 §五 验收。
+- 本任务书已于 **2026-09-16** 由执行会话实施完毕（T0–T3 全部落地；逐条验收与遗留见 §十 执行状态）。
+
+---
+
+## 十、执行状态（2026-09-16 实施记录）
+
+**结论：T0–T3 全部落地；§五 验收清单除「真机 `-demo` 两段」一项（设备不在线）外全部通过。**
+实施提交：见仓库 git log 2026-09-16（`学生模式真机接入彩色` 之后的 `资料→老师` 系列提交）。
+
+### 10.1 逐条验收证据
+
+| 验收项 | 结果 |
+|---|---|
+| `go test ./...` | 全绿（`-count=1` 强制重跑过） |
+| `go vet ./...` / `go build ./...` | 通过 |
+| `gofmt -l` | 无输出（按 **LF 化副本**口径核验——仓库存量 CRLF 文件的原生 `gofmt -l` 全文件误报，与本轮无关） |
+| `-game nrc -print-protocol` | world **10 条 / 887 字符**、battle **10 条 / 1376 字符**；两段均含 idx[5][6] 判据；world 段零战斗条目（无 `cast_` / 咕噜球 / `gather_energy`）、battle 段零大世界专属条目（摇杆长按与坐标仅在 world） |
+| `-game jieyou -print-protocol` | 加载成功、world 10 条 / 753 字符。顺手清理 `"zoom": true` 存量残留（全代码库已无消费点，且会致 `DisallowUnknownFields` 加载失败——**改前该档案完全无法加载**） |
+| `-game mobile_generic -print-protocol` | 零影响（world 3 条 / 82 字符与改前一致；无 `battle_detect`，只有 world 段） |
+| 文档同步 | README 已拆分 → 正文同步到 `docs/action-layer.md`（§9.5：三桶字段与注入规则、门禁 500/4000、`-print-protocol` 自检）与 `docs/teacher-demo-video.md`（§9.4：`-demo-hints` 行指向 `-print-protocol`；hints 坑条目补「决策侧（`ActionProtocol`）同期对齐」） |
+| 真机 `-demo` 两段（world / 战斗） | **未执行**：验收所需真机 `1cd89cd4` 不在线（当时仅 `ecbff3a5` 与远程 217），Ollama 亦未响应。待设备恢复后补跑，口径 = 不劣化（空答复率 / 动作种类数 / 重复告警次数） |
+
+### 10.2 与 §五 标称数字的差异说明（重要）
+
+实测分两阶段记录：**T2 阶段** battle **12 条 / 1677 字符**（12/13 尚在桶内）→ **T3 迁出后** battle **10 条 / 1376 字符**。
+
+§五 标称「T2 阶段 battle 10 条 / 1376；T3 迁出后 8 条 / 1075」的核对：
+
+- **1376 与实际终态吻合**（标称的「T2 阶段」数字实为 12/13 迁出后的终态值）；
+- `1075` 与「8 条」无法由任何条目组合导出（逐条核算 155/340/56/134/323/164/137/95 的全部组合）——判定为算术笔误；
+- 执行以 §四 分组表（T2.4）的**文字指令**为准：12/13 先入 battle 桶（T2）→ 迁出到 `outputs/洛克王国世界-抓宠玩法知识.md`（T3）。终态实测 world 10/887、battle 10/1376。
+
+### 10.3 附带修复与收尾（§六 影响面三条 + 计划外两条）
+
+1. `cmd/helper/main.go`：档案摘要打印改为三桶分布（实测输出「界面先验: 16 条（通用 4 / 大世界 6 / 战斗 6）」）。
+2. `internal/teacher/demonstrator.go`：`protocolOptions` 注释更新（`o.Hints` 是 `HintsForState(d.UIState)` 的按态合并结果；`-demo-hints` 追加在其后）。
+3. `cmd/video/main.go`：注明视频判读只取通用桶（离线无界面态概念）；若日后判读质量下降，再按「判读时段内的界面态」注入。
+4. **计划外**：`profiles/jieyou.json` 清理 `"zoom": true` 残留（见 10.1）。
+5. **计划外**：`internal/game/profile.go` 的 `Hints` 字段对齐空格修正（gofmt 核验发现）。
+
+### 10.4 §五「已知遗留」承接（本轮不做，留待后续轮）
+
+1. nrc hints[0][1] 坐标写死（违反「坐标不进 hints」规则）——需单独一轮实测（模型改从按钮 note 获取位置）。
+2. hints[8]/hints[11] 过程性叙述精简——未做。
+3. `jieyou`/`sparkle` hints 判据化改写——未做（分层对二者零影响；`sparkle` 因并发会话改动未纳入本轮）。

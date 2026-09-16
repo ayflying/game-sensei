@@ -3,6 +3,7 @@ package game
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ayflying/game-sensei/internal/agent"
@@ -49,7 +50,8 @@ func TestLoad_nrc档案内容(t *testing.T) {
 	if p.Move.Radius[0] <= 0 || p.Move.Radius[1] <= 0 {
 		t.Errorf("半径未填默认值: %v", p.Move.Radius)
 	}
-	if len(p.Hints) == 0 {
+	// nrc 分层后通用桶可能很小甚至为空，按三桶合计检查（否则断言只覆盖通用桶）。
+	if len(p.Hints)+len(p.HintsWorld)+len(p.HintsBattle) == 0 {
 		t.Error("nrc 档案应带有界面先验")
 	}
 }
@@ -148,6 +150,28 @@ func TestLoad_校验规则(t *testing.T) {
 		}
 		if _, err := Load(path); err == nil {
 			t.Errorf("%s 应报错", c.name)
+		}
+	}
+}
+
+// 先验容量门禁（maxHintsTotalChars / maxHintChars）：空条目、单条超长、
+// 单态合计超限都必须在加载时报错——先验直接拼进提示词，写错不许静默退化。
+func TestLoad_先验容量门禁(t *testing.T) {
+	big := make([]string, 0, 10)
+	for i := 0; i < 10; i++ { // 10 x 500 = 5000 > 4000 合计上限
+		big = append(big, `"`+strings.Repeat("字", 500)+`"`)
+	}
+	for _, tc := range []struct{ name, raw, want string }{
+		{"空条目", `{"name":"t","move":{"mode":"none"},"hints":["ok","  "]}`,
+			"空条目"},
+		{"单条超长", `{"name":"t","move":{"mode":"none"},"hints":["` + strings.Repeat("字", 501) + `"]}`,
+			"超过单条上限"},
+		{"合计超限", `{"name":"t","move":{"mode":"none"},"hints_world":[` + strings.Join(big, ",") + `]}`,
+			"超过上限"},
+	} {
+		_, err := decode(tc.name, []byte(tc.raw))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, 期望含 %q", tc.name, err, tc.want)
 		}
 	}
 }

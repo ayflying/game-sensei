@@ -111,6 +111,9 @@ func (d *Demonstrator) gameName() string {
 
 // protocolOptions 合并档案先验与临时先验，得到给老师的动作协议配置。
 // 按 UIState 收窄（战斗态只给战斗项、无 MOVE、无自由坐标）。
+//
+// 注：档案先验已按界面态分层——o.Hints 是 Profile.HintsForState(d.UIState) 的
+// 「通用 + 该态专属」合并结果；-demo-hints 的临时先验追加在其后。
 func (d *Demonstrator) protocolOptions() agent.ProtocolOptions {
 	// 零值兜底 = 全开（无档案时 TAP/SWIPE 是老师唯一的交互手段）；
 	// 有档案时由 ProtocolOptionsForState 按态决定收窄程度。

@@ -2,6 +2,7 @@ package game
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -307,6 +308,31 @@ func TestProtocolOptions_按档案裁剪动作空间(t *testing.T) {
 	}
 	if len(co.Buttons) != 0 {
 		t.Error("无按钮档案不该列出 PRESS")
+	}
+}
+
+// hints 必须按界面态分层注入：战斗态不该看到摇杆类先验，世界态不该看到技能类先验。
+func TestProtocolOptions_先验按界面态分层(t *testing.T) {
+	p := &Profile{
+		Name:        "分层测试",
+		Hints:       []string{"通用"},
+		HintsWorld:  []string{"摇杆在世界态"},
+		HintsBattle: []string{"技能在战斗态"},
+	}
+	join := func(ss []string) string { return strings.Join(ss, "|") }
+
+	w := join(p.ProtocolOptionsForState(StateWorld).Hints)
+	if !strings.Contains(w, "通用") || !strings.Contains(w, "摇杆在世界态") || strings.Contains(w, "技能在战斗态") {
+		t.Errorf("world 态先验 = %q", w)
+	}
+	b := join(p.ProtocolOptionsForState(StateBattle).Hints)
+	if !strings.Contains(b, "通用") || !strings.Contains(b, "技能在战斗态") || strings.Contains(b, "摇杆在世界态") {
+		t.Errorf("battle 态先验 = %q", b)
+	}
+	// 未知态按 world 处理（与按钮收窄的既有约定一致）
+	u := join(p.ProtocolOptionsForState("").Hints)
+	if !strings.Contains(u, "摇杆在世界态") || strings.Contains(u, "技能在战斗态") {
+		t.Errorf("未知态先验 = %q，应等同 world", u)
 	}
 }
 

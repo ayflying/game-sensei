@@ -366,6 +366,9 @@ func annotateClips(cfg runConfig, clips []clip, outDir string) (string, error) {
 			}
 			buttons = append(buttons, label)
 		}
+		// 只取通用桶：视频判读是离线的、没有界面态概念（无法按判读时段判定 world/battle），
+		// 且 annotate.go 侧已有照抄防护。2026-09-16 分层（hints_world/hints_battle）后，
+		// 这里不会拿到态专属先验——若日后发现判读质量下降，再按「判读时段内的界面态」注入。
 		hints = append(hints, prof.Hints...)
 	} else {
 		fmt.Println("提示    未指定 -game，判读时拿不到按钮名，产出的策略可能无法直接执行")

@@ -298,6 +298,26 @@ func TestActionProtocol_带档案(t *testing.T) {
 	}
 }
 
+// 决策侧的 hints 同样需要防护：视频判读侧（internal/video/annotate.go）已因
+// 「8 段里 6 段照搬先验」补过两段式约束，决策侧（本函数）此前是零防护。
+func TestActionProtocol_界面先验带防护(t *testing.T) {
+	p := ActionProtocol(ProtocolOptions{Hints: []string{"点任务追踪文字可以自动寻路"}})
+	for _, want := range []string{"不要把这些说法直接当作结论", "只能取下面【可用动作】里列出"} {
+		if !contains(p, want) {
+			t.Errorf("界面先验缺少防护话术 %q", want)
+		}
+	}
+	// 防护话术不能把合法动作名一起否掉——battle 先验里直接写了 PRESS name=cast_xxx。
+	p2 := ActionProtocol(ProtocolOptions{Buttons: []string{"cast_resha"}, Hints: []string{"直接 PRESS name=cast_resha 出招"}})
+	if !contains(p2, "PRESS") || !contains(p2, "cast_resha") {
+		t.Error("带档案时协议不应丢失可用动作名")
+	}
+	// 没有先验时不该出现防护段落（避免无谓占提示词预算）。
+	if p3 := ActionProtocol(ProtocolOptions{AllowFreePointer: true}); contains(p3, "界面先验") {
+		t.Error("没有 hints 时不应出现界面先验段落")
+	}
+}
+
 // 提示词里的示例必须写成占位符。踩过的坑：早期示例写了具体坐标
 // （ACTION JOYSTICK cx=0.21 cy=0.69 ...），模型逐字节照抄这一行当答案，
 // 8 步实况动作完全一致——看着像「模型不会决策」，实际是「把示例当答案抄了」。

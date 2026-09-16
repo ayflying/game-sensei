@@ -220,7 +220,9 @@ func (p *Profile) ProtocolOptionsForState(state string) agent.ProtocolOptions {
 	}
 	// 自由坐标默认放开；只有明确的战斗态才收。
 	o := agent.ProtocolOptions{
-		Hints:            p.Hints,
+		// 先验按界面态分层注入：通用 + 该态专属。原为 p.Hints（无条件全量注入，
+		// 大世界态白背 1404 字符战斗先验）。未知态按 world 处理，见 HintsForState。
+		Hints:            p.HintsForState(state),
 		HasMove:          p.Move.Mode != MoveNone && p.Move.Mode != "",
 		MoveNote:         p.Move.moveNote(),
 		AllowFreePointer: true,
