@@ -26,19 +26,29 @@ func NewStudentActor(weightsPath string, prof *game.Profile) (agent.Actor, error
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("学生: %s（训练验证准确率 %.1f%%）\n", weightsPath, net.MetaValAcc()*100)
+	kind := "灰度"
+	if net.InChannels() == 3 {
+		kind = "彩色"
+	}
+	fmt.Printf("学生: %s（%s输入 inC=%d，训练验证准确率 %.1f%%）\n",
+		weightsPath, kind, net.InChannels(), net.MetaValAcc()*100)
 	return &studentActor{net: net, prof: prof}, nil
 }
 
 func (s *studentActor) Name() string { return "student-cnn" }
 
+// NeedsColor 实现 agent.Actor：彩色模型必须拿到彩色观测——
+// v8/v9 实测彩色是分类头摆脱塌缩的决定性变量，喂灰度帧等于让模型失明。
+func (s *studentActor) NeedsColor() bool { return s.net.InChannels() == 3 }
+
 // decideMs 是学生连续输出方向动作时的保持时长（毫秒）。
 // 与规则学生的 ruleMoveMs 同量级：一次指令产生可观测位移。
 const decideMs = 300
 
-// Decide 看一帧灰度图输出 L1 动作。翻译规则见 classToAction。
-func (s *studentActor) Decide(frame *image.Gray) (agent.Action, error) {
-	out, err := s.net.Decide(frame)
+// Decide 看一帧画面输出 L1 动作。帧类型自适应（灰度/彩色权重都走这里），
+// 翻译规则见 classToAction。
+func (s *studentActor) Decide(img image.Image) (agent.Action, error) {
+	out, err := s.net.DecideImage(img)
 	if err != nil {
 		return agent.Action{}, err
 	}

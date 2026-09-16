@@ -11,7 +11,7 @@ func fakeNet(t *testing.T) *Net  { return fakeNetCh(t, 1) }
 
 func fakeNetCh(t *testing.T, inC int) *Net {
 	t.Helper()
-	n := &Net{hidden: 64, inC: inC}
+	n := &Net{hidden: 64, inC: inC, inH: InH}
 	zeros := func(sz int) []float32 {
 		v := make([]float32, sz)
 		return v
@@ -78,12 +78,49 @@ func TestDecide输出合法类别(t *testing.T) {
 
 func TestPreprocess横竖屏一致(t *testing.T) {
 	// 同一内容不同长宽比的帧，中心裁剪后应落到相同输入尺寸
+	n := fakeNet(t)
 	h := image.NewGray(image.Rect(0, 0, 800, 600))
 	v := image.NewGray(image.Rect(0, 0, 427, 782))
-	a := preprocess(h)
-	b := preprocess(v)
+	a := n.preprocess(h)
+	b := n.preprocess(v)
 	if len(a) != InH*InW || len(b) != InH*InW {
 		t.Fatalf("preprocess 输出尺寸错误: %d / %d", len(a), len(b))
+	}
+}
+
+// TestForward竖屏视野 覆盖 inH=96（2:3 竖屏视野，2026-09-16 参数化）：
+// 尺寸链从 48 高度的 46x62->...->8x12 变成 94x62->...->20x12，
+// 前向不 panic、输出维度正确、坐标在 0~1，且 96 的预处理输出尺寸正确。
+func TestForward竖屏视野(t *testing.T) {
+	n := fakeNetCh(t, 3)
+	n.inH = 96
+	x := make([]float32, 3*96*InW)
+	for i := range x {
+		x[i] = 0.4
+	}
+	logits, coords := n.forward(x)
+	if len(logits) != len(Classes) || len(coords) != 2 {
+		t.Fatalf("96 高度前向输出错误: logits=%d coords=%d", len(logits), len(coords))
+	}
+	for i, c := range coords {
+		if c < 0 || c > 1 {
+			t.Fatalf("coords[%d]=%v 超出 0~1", i, c)
+		}
+	}
+	// 96 高度下的完整 DecideImage（含预处理）
+	img := image.NewRGBA(image.Rect(0, 0, 540, 1170))
+	for i := range img.Pix {
+		img.Pix[i] = uint8(i % 256)
+	}
+	act, err := n.DecideImage(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if act.X < 0 || act.X > 1 || act.Y < 0 || act.Y > 1 {
+		t.Fatalf("坐标越界: (%v,%v)", act.X, act.Y)
+	}
+	if plane := 96 * InW; len(n.preprocessRGB(img)) != 3*plane {
+		t.Fatalf("96 高度 preprocessRGB 输出 %d, 期望 %d", len(n.preprocessRGB(img)), 3*plane)
 	}
 }
 
@@ -109,7 +146,7 @@ func TestDecideImage彩色模型(t *testing.T) {
 		t.Fatal("3 通道模型走灰度入口应报错，实际通过")
 	}
 	// preprocessRGB 尺寸与三通道有效性
-	x := preprocessRGB(img)
+	x := n.preprocessRGB(img)
 	if len(x) != 3*InH*InW {
 		t.Fatalf("preprocessRGB 输出 %d, 期望 %d", len(x), 3*InH*InW)
 	}

@@ -50,6 +50,7 @@ import (
 	"github.com/ayflying/game-sensei/internal/overlay"
 	"github.com/ayflying/game-sensei/internal/plan"
 	"github.com/ayflying/game-sensei/internal/teacher"
+	"github.com/ayflying/game-sensei/internal/vision"
 )
 
 // 重定向标准流到 f。
@@ -625,7 +626,27 @@ type sample struct {
 	Action agent.Action
 }
 
-// runLoop 是实时执行回路（goroutine A）：抓屏 -> 决策 -> 输入，按节拍节流。
+// grabObs 按策略声明的观测需求抓一帧：
+//
+//	彩色策略（NeedsColor）→ 彩色原图（GrabColorFresh，安卓 screencap / PC BitBlt）
+//	                         再降到 downWidth 宽——复刻训练帧的降采样口径；
+//	其余策略              → 便宜的灰度降采样链（原行为不变）。
+//
+// 为什么「抓什么帧」由回路决定而不是策略自己抓：策略只该声明需要什么，
+// 抓屏是后端能力（平台相关），让策略直接摸后端会把平台差异漏进策略实现。
+func grabObs(be backend, actor agent.Actor, downWidth int) (image.Image, error) {
+	if !actor.NeedsColor() {
+		return be.Grab(downWidth)
+	}
+	img, err := be.GrabColorFresh()
+	if err != nil {
+		return nil, err
+	}
+	// Downscale 用区域平均（box）降采样：1080->540 恰为 2x2 均值，
+	// 与训练侧 PIL 的 BICUBIC 降采样落到同一量级的像素统计。
+	return vision.Downscale(img, downWidth), nil
+}
+
 // runLoop 是实时执行回路（goroutine A）：抓屏 -> 决策 -> 输入，按节拍节流。
 //
 // 感知与行动都通过 backend 抽象，因此同一段回路既能驱动本机键鼠，
@@ -648,7 +669,7 @@ func runLoop(cfg config.Config, tick time.Duration, actor agent.Actor,
 		}
 
 		t0 := time.Now()
-		frame, err := be.Grab(cfg.DownsampleWidth)
+		frame, err := grabObs(be, actor, cfg.DownsampleWidth)
 		if err != nil {
 			return err
 		}
@@ -833,17 +854,35 @@ func gameKeyword(cfg config.Config, prof *game.Profile) string {
 	return ""
 }
 
-func meanGray(img *image.Gray) uint8 {
+// meanGray 估计一帧的平均亮度（写入遥测记录，供卡死判据与状态栏用）。
+// 灰度图走逐像素精确快路径；彩色图按 4x4 抽样——这个值只用于日志，
+// 不需要逐像素精确，抽样把 250 万次 At() 降到 16 万次。
+func meanGray(img image.Image) uint8 {
 	if img == nil || img.Bounds().Dx() == 0 {
 		return 0
 	}
+	if g, ok := img.(*image.Gray); ok {
+		b := g.Bounds()
+		var sum uint64
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			row := y * g.Stride
+			for x := b.Min.X; x < b.Max.X; x++ {
+				sum += uint64(g.Pix[row+x])
+			}
+		}
+		return uint8(sum / uint64(b.Dx()*b.Dy()))
+	}
 	b := img.Bounds()
-	var sum uint64
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		row := y * img.Stride
-		for x := b.Min.X; x < b.Max.X; x++ {
-			sum += uint64(img.Pix[row+x])
+	var sum, n uint64
+	for y := b.Min.Y; y < b.Max.Y; y += 4 {
+		for x := b.Min.X; x < b.Max.X; x += 4 {
+			r, g, bb, _ := img.At(x, y).RGBA()
+			sum += uint64((299*r + 587*g + 114*bb) / 1000 >> 8)
+			n++
 		}
 	}
-	return uint8(sum / uint64(b.Dx()*b.Dy()))
+	if n == 0 {
+		return 0
+	}
+	return uint8(sum / n)
 }

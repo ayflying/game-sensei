@@ -66,7 +66,8 @@ assert len(CLASS_WEIGHTS) == len(CLS), "CLASS_WEIGHTS 长度必须与 CLS 一致
 # 数据：读取 demo 数据集
 # ---------------------------------------------------------------------------
 
-def load_demos(data_dir: Path, recursive: bool, rgb: bool = False) -> tuple[list[dict], dict]:
+def load_demos(data_dir: Path, recursive: bool, rgb: bool = False,
+               in_h: int = 48) -> tuple[list[dict], dict]:
     """读一个或多个示范目录，返回 (样本列表, 普查统计)。
 
     每个样本 = {"frame": float32[C,H,W]（rgb）或 [H,W]（灰度）, "cls": int,
@@ -111,7 +112,7 @@ def load_demos(data_dir: Path, recursive: bool, rgb: bool = False) -> tuple[list
                     dropped[str(s.get("kind", ""))] += 1
                     continue
                 img = Image.open(frame_path).convert("RGB" if rgb else "L")
-                arr = center_crop_resize(img, 64, 48)
+                arr = center_crop_resize(img, 64, in_h)
                 if rgb:
                     arr = np.transpose(arr, (2, 0, 1))  # [H,W,3] -> [3,H,W]
                 samples.append({"frame": arr, "cls": CLS.index(kind), "x": x, "y": y,
@@ -497,6 +498,10 @@ def main() -> None:
     ap.add_argument("--rgb", action="store_true",
                     help="三通道彩色输入（conv1 in_channels=3，采集帧需为 RGB）。"
                          "权重文件由 conv1_w 形状自然携带通道数（[8,3,3,3] vs [8,1,3,3]）。")
+    ap.add_argument("--in-h", type=int, default=48,
+                    help="观测输入高度（宽固定 64）。默认 48 = 4:3 横版窗口；竖屏手游的关键 UI "
+                         "多在中下部（YoYa Star 卡片带 y≈0.75~0.85），4:3 中心裁剪会把它裁掉——"
+                         "实测 v8 学生视野 y∈[0.33,0.67] 看不见卡片。竖屏游戏用 96（2:3）及以上")
     ap.add_argument("--val-frac", type=float, default=0.2,
                     help="分层切分的验证集比例（按类别内比例取，每类至少留 1 条在训练集）")
     args = ap.parse_args()
@@ -683,7 +688,7 @@ def main() -> None:
         "coord_search": "选优依据：coord_only 时=val 坐标误差最小；否则=val_acc 最大。",
         "val_coord_err": round(best_coord_err, 4) if args.coord_only else None,
         "down_w": 64,
-        "down_h": 48,
+        "down_h": args.in_h,
         "trained_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
         # 训练配置与代码版本（DEVELOPMENT_PLAN §7：模型必须可追溯到数据集/配置/提交）
         "epochs": args.epochs,

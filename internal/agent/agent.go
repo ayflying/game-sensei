@@ -10,6 +10,7 @@ package agent
 import (
 	"fmt"
 	"image"
+	"image/draw"
 	"strings"
 	"time"
 )
@@ -114,12 +115,33 @@ func (a Action) String() string {
 	}
 }
 
-// Actor 是「学生」的抽象：给定一帧灰度观测，输出一个动作。
+// Actor 是「学生」的抽象：给定一帧观测，输出一个动作。
 // 未来量化网络实现该接口即可无缝替换规则策略。
+//
+// 观测类型放宽为 image.Image（2026-09-16）：量化学生一旦在彩色帧上训练
+// （v8/v9 实测：彩色是分类头活过来的决定性变量），回路就必须能喂彩色帧。
+// NeedsColor 让策略声明自己的观测需求，回路据此选择抓帧链路——
+// 灰度策略继续走便宜的降采样灰度链，彩色策略才付全套截图成本。
 type Actor interface {
-	Decide(frame *image.Gray) (Action, error)
+	Decide(img image.Image) (Action, error)
 	// Name 返回策略标识（用于日志）。
 	Name() string
+	// NeedsColor 报告策略是否需要彩色观测。
+	NeedsColor() bool
+}
+
+// asGray 把任意观测图转成灰度；已是 *image.Gray 时直接复用（零拷贝）。
+// 给只需要亮度信息的策略（如 RuleActor）兜底，让接口放宽不产生行为变化。
+func asGray(img image.Image) *image.Gray {
+	if img == nil {
+		return nil
+	}
+	if g, ok := img.(*image.Gray); ok {
+		return g
+	}
+	g := image.NewGray(img.Bounds())
+	draw.Draw(g, g.Bounds(), img, img.Bounds().Min, draw.Src)
+	return g
 }
 
 // RuleActor 是 Phase 0 的规则学生：
@@ -148,9 +170,13 @@ func NewRule() *RuleActor { return &RuleActor{} }
 // Name 实现 Actor。
 func (r *RuleActor) Name() string { return "rule-stub" }
 
+// NeedsColor 实现 Actor：规则学生只看亮度，灰度链即可。
+func (r *RuleActor) NeedsColor() bool { return false }
+
 // Decide 实现 Actor。演示用启发式：亮度偏向哪侧就往哪侧走一步；
 // 若左右几乎相等，则交替轻推左右，保证动作链路持续有输出。
-func (r *RuleActor) Decide(frame *image.Gray) (Action, error) {
+func (r *RuleActor) Decide(img image.Image) (Action, error) {
+	frame := asGray(img)
 	if frame == nil || frame.Bounds().Dx() == 0 {
 		return Action{Kind: ActionNone}, nil
 	}

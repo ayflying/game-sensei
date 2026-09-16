@@ -411,3 +411,38 @@ Store 三档价格（本轮补齐数值）：**NO ADS US$1.99**（永久去弹�
 **验证**：`go build` + 两包测试 PASS；档案补丁脚本原子写入（临时文件 + os.replace，避免跑批中 `go run` 编译读到半文件）。跑批分界：s36/s37 仍为旧参数（各局 WIN，补点救回），**s38 起新档案生效**（plan.log 出现新 note=13 处）；s36 起三关均无「5 轮未命中」。
 
 **代价与残余风险**：选装步预算 13s→16s，浅色广告假成立时对广告中心多暴露 1 次点击（已知残留风险，靠每关后紧跟清广告步压制）；缓冲步把总时长拉长约 4s/局。
+
+### 12.19 学生模式真机接入彩色 + 输入高度参数化（2026-09-16 深夜）
+
+**背景**：§12.17 收尾时点明「下一站」——`cmd/helper` 的 StudentActor 仍走灰度 `Decide` 路径、抓帧链路先转灰，彩色权重（v8/v9）根本没机会上真机。本轮把学生实时回路完整接上彩色链路，并用 v10 权重在真机完成选装页识别验证。
+
+**一、实时回路接入彩色（4 处工程改动）**：
+
+| 文件 | 改动 |
+|---|---|
+| `internal/agent/agent.go` | Actor 接口放宽：`Decide(img image.Image)`（原 `*image.Gray`）+ 新增 `NeedsColor() bool`；`RuleActor` 内置 `asGray`（已是灰度则零拷贝，否则 `draw.Draw` 转换），`NeedsColor()=false` |
+| `cmd/helper/backend.go` | 接口补 `GrabColorFresh()` 声明——pc/adb 两实现早已有该方法，仅接口层缺声明（编译报 `be.GrabColorFresh undefined` 才暴露） |
+| `cmd/helper/main.go` | 新增 `grabObs(be, actor, downWidth)` 按观测需求分派：灰度 actor 走原 `be.Grab`；彩色 actor 走 `GrabColorFresh` → `vision.Downscale`（box 平均降到 540 宽）。`meanGray` 参数由 `*image.Gray` 放宽为 `image.Image`（彩色走 4×4 抽样亮度） |
+| `cmd/helper/student.go` | `Decide` 改调 `net.DecideImage(img)`（通道自适应主入口，灰度入口对彩色模型会报错）；新增 `NeedsColor() = net.InChannels()==3`；启动日志补打印 `inC` 与「灰度/彩色」标识 |
+
+**二、输入高度参数化（v10 的核心修复）**：
+
+- **根因（v8 时代选装页识别「像瞎猜」的真凶）**：旧网络硬编码 64×48（4:3 中心裁剪），竖屏手游里学生视野仅 y∈[0.33, 0.67]，**看不见选装卡片带**（y≈0.75~0.85）——训练集里的 tap 类很可能学的是广告页/无关浅色区，真机新主题帧自然误判。
+- **改动**：权重 `meta.down_h` 携带输入高（`train.py` 新增 `--in-h`，默认 48 向后兼容，竖屏手游用 96）；Go 侧 `Net.inH` 从权重推导（缺省 48，合法区间 16~256 越界报错），前向尺寸链改为逐层由 `n.inH` 推导，预处理两路（灰度 `preprocess` / 彩色 `preprocessRGB`）同步参数化，二者由包级函数改为 `(*Net)` 方法；新增 `InputHeight()` 访问器；stucheck / `parity_v6.py` 同步支持可变 in_h。
+- **v10 权重**：RGB + `in_h=96`（2:3 视野，y∈[0.15, 0.85]，完整覆盖卡片带），`--override-class-weights "tap=2.0,none=1.0"` + `--preference-weights "WIN=1.0,FAIL=0.3"` + 80 epoch，val_acc **82.05%**（与 v8 同水平），预测分布 tap:18 / none:21。文件 `models/yoyastar_pick_v10.weights.json`。
+
+**三、真机验证（v10）**：
+
+- **dry-run 链路全通**：彩色帧被正确抓取、v10 正确加载（日志 `彩色输入 inC=3，训练验证准确率 82.0%`）、输出动作。
+- **时间轴验证**：42s 连续抓帧 10 帧（旁路 `monitor_frames.py` 留档 + 时间戳），**全部判 tap**，事后逐帧读图确认全为真选装页（Future Era 主题，裙 / 裤 / 鞋多轮翻页）⇒ **选装页真机识别正确**，接口改造与模型视野修复双生效。
+- **排除实验**：同一页面 PNG 原图 vs JPEG 两种输入 class 一致，排除「解码器差异导致错配」这一类假象。
+- **一场假象溯源**：中途一度疑为「学生打压崩」，实为**并发抓屏竞争**——helper 跑批与旁路 monitor 同时抢占 ADB，截屏从 ~1s 飙到 3.4~3.9s/帧。教训：真机验证单人独占设备，不并发抓屏（与既有「跑批期间勿改脚本」同源）。
+
+**四、残余局限（如实记录，非失败）**：
+
+- **Alien Girl「配件选择」漏报**：该类页面是**图标式小卡片**（非人物 / 服装大图），v10 判 `none`。训练样本以人物 / 服装大图为主，属模型泛化局限，补该类样本重训可解。
+- **广告页仍会被部分误判为 tap**：学生线目前没有清广告逻辑。plan 线靠「每关后紧跟清广告步 + 入口守卫」压制，学生线上真机跑批前需补同类逻辑或加广告检测判据。
+
+**工具链**（`.workbuddy/yoya-star/phone/`）：`nav_yoya.py`（reset / theme / start 手动导航，reset 复用 plan_round 的 restore 逻辑）、`monitor_frames.py`（旁路抓帧留档 + times.tsv 时间戳）、`parity_v6.py`（Go/Python 对拍，支持可变 in_h）；`stucheck` 补 `_ "image/png"` 以读 PNG 原图。
+
+**本轮口径**：真机结论为「链路 + 选装页识别」**定性**验证；学生线完整跑批（胜负统计）尚未进行，留作下一阶段。

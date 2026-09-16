@@ -29,7 +29,13 @@ type backend interface {
 	// GrabColor 抓一帧全分辨率彩色画面，供「老师」VLM 判读。
 	// 与 Grab 分开是刻意的：学生要的是低延迟小张量，老师要的是能认字的清晰画面，
 	// 两者的分辨率与色彩诉求正好相反，混用一个接口必然有一方将就。
+	//
+	// ⚠️ 安卓侧可能复用最近一次截图的缓存（同一拍老师/学生共用同一张），
+	// 需要「现在这一刻」的画面必须用 GrabColorFresh。
 	GrabColor() (image.Image, error)
+	// GrabColorFresh 抓一帧「现在」的全分辨率彩色画面（安卓强制重新截图）。
+	// 实时回路给彩色学生喂观测、plan 轮询判据都依赖它。
+	GrabColorFresh() (image.Image, error)
 	// Resolve 把语义动作（L1）展开成平台动作（L2）。
 	// 幂等：已是 L2 的动作原样返回。主要用于日志与预检——
 	// Apply 内部也会先做一次，调用方不必先 Resolve 再 Apply。

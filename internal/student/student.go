@@ -38,7 +38,10 @@ var Classes = []string{
 	"tap", "press", "wait", "none",
 }
 
-// InW/InH 是网络输入尺寸（与 train.py 的 center_crop_resize 目标一致）。
+// InW/InH 是网络输入的**默认**尺寸（与 train.py 的 center_crop_resize 目标一致）。
+// 2026-09-16 起输入高度可由权重自带（meta.down_h）覆盖：
+// 48 = 4:3 横版视野（旧默认）；96 = 2:3 竖屏视野（含 YoYa Star 卡片带 y≈0.75~0.85）。
+// InH 常量只作缺省值，实际尺寸以 Net.inH 为准。
 const (
 	InW = 64
 	InH = 48
@@ -54,6 +57,7 @@ type weightsFile struct {
 	Weights map[string][]float32 `json:"weights"`
 	Meta    struct {
 		ValAcc float64 `json:"val_acc"`
+		DownH  int     `json:"down_h"` // 训练输入高度；缺省（旧权重）= InH
 	} `json:"meta"`
 }
 
@@ -61,6 +65,7 @@ type weightsFile struct {
 type Net struct {
 	hidden int
 	inC    int // 输入通道数：1=灰度（旧）、3=RGB 彩色（2026-09-16 起）
+	inH    int // 输入高度：48=4:3（旧默认）、96=2:3 竖屏视野；宽度固定 InW
 
 	conv1W []float32 // [8,inC,3,3]
 	conv1B []float32 // [8]
@@ -102,6 +107,15 @@ func Load(path string) (*Net, error) {
 	w := f.Weights
 	n := &Net{hidden: f.Arch.Hidden}
 	n.meta.valAcc = f.Meta.ValAcc
+	// 输入高度由权重自带（meta.down_h）：v10 起可写 96（2:3 竖屏视野）；
+	// 旧权重没有该字段 → 默认 48，行为逐位不变。
+	n.inH = f.Meta.DownH
+	if n.inH <= 0 {
+		n.inH = InH
+	}
+	if n.inH < 16 || n.inH > 256 {
+		return nil, fmt.Errorf("权重声明输入高度 down_h=%d 超出合理范围 [16,256]", n.inH)
+	}
 	// 输入通道数由 conv1_w 形状自然携带：[8,inC,3,3]。旧权重是 8*1*9=72，
 	// 彩色权重是 8*3*9=216——不额外约定 meta 字段，避免两处不一致。
 	c1n := len(w["conv1_w"])
@@ -187,6 +201,10 @@ func (n *Net) MetaValAcc() float64 { return n.meta.valAcc }
 // 还是（仅 1 通道时）灰度入口 Decide。
 func (n *Net) InChannels() int { return n.inC }
 
+// InputHeight 返回网络输入高度（48=4:3 横版视野，96=2:3 竖屏视野）。
+// 也告诉调用方「这个模型看的是画面的哪一段」——竖屏游戏用 4:3 会看不到卡片带。
+func (n *Net) InputHeight() int { return n.inH }
+
 // Decide 实现 agent.Actor（本包不 import agent，避免依赖环——见 Adapter）。
 // 输入任意尺寸灰度帧：内部居中裁剪到 64:48 再最近邻缩放到 64x48（与训练一致）。
 func (n *Net) Decide(frame *image.Gray) (Action, error) {
@@ -198,7 +216,7 @@ func (n *Net) Decide(frame *image.Gray) (Action, error) {
 	if n.inC != 1 {
 		return Action{}, fmt.Errorf("这是 %d 通道模型，灰度入口不可用：请用 DecideImage 传彩色帧", n.inC)
 	}
-	return n.decide(preprocess(frame))
+	return n.decide(n.preprocess(frame))
 }
 
 // DecideImage 是通道自适应的主入口（2026-09-16 起，彩色模型上线后的推荐入口）：
@@ -209,9 +227,9 @@ func (n *Net) DecideImage(img image.Image) (Action, error) {
 		return Action{}, nil
 	}
 	if n.inC == 1 {
-		return n.decide(preprocess(toGray(img)))
+		return n.decide(n.preprocess(toGray(img)))
 	}
-	return n.decide(preprocessRGB(img))
+	return n.decide(n.preprocessRGB(img))
 }
 
 // decide 是「预处理已就绪」的公共后半段：前向 + argmax + 坐标。
@@ -246,35 +264,44 @@ type Action struct {
 	X, Y  float64 // tap 类别时的归一化坐标
 }
 
-// ForwardRaw 直接对 48x64 归一化输入做前向，暴露给一致性校验
+// ForwardRaw 直接对 [inC,inH,64] 归一化输入做前向，暴露给一致性校验
 // （.workbuddy 下的 parity 脚本用）与未来可能的批量推理场景。
 func (n *Net) ForwardRaw(x []float32) (logits, coords []float32) {
 	return n.forward(x)
 }
 
 // forward 是纯 Go 前向传播，布局与 train.py 逐层一致。
+//
+// 尺寸链逐层推导（2026-09-16 随 inH 参数化）：默认 n.inH=48 时
+// 46x62 -> 23x31 -> 21x29 -> 10x14 -> 8x12，与旧硬编码版本逐位相同；
+// n.inH=96（2:3 竖屏视野）时自动跟随 94x62 -> 47x31 -> 45x29 -> 22x14 -> 20x12。
 func (n *Net) forward(x []float32) (logits, coords []float32) {
-	// conv1: [inC,48,64] -> [8,46,62]（inC=1 灰度 / 3 RGB）
-	c1 := conv3x3(x, n.inC, InH, InW, n.conv1W, n.conv1B, 8)
+	// conv1: [inC,inH,64] -> [8,inH-2,62]（inC=1 灰度 / 3 RGB）
+	c1 := conv3x3(x, n.inC, n.inH, InW, n.conv1W, n.conv1B, 8)
+	h1, w1 := n.inH-2, InW-2
 	relu(c1)
-	p1 := maxpool2(c1, 8, 46, 62) // [8,23,31]
+	p1h, p1w := h1/2, w1/2 // maxpool2 奇数时丢弃末行列，与 torch 一致
+	p1 := maxpool2(c1, 8, h1, w1)
 
-	// conv2: -> [16,21,29]
-	c2 := conv3x3(p1, 8, 23, 31, n.conv2W, n.conv2B, 16)
+	// conv2: -> [16,p1h-2,p1w-2]
+	c2 := conv3x3(p1, 8, p1h, p1w, n.conv2W, n.conv2B, 16)
+	h2, w2 := p1h-2, p1w-2
 	relu(c2)
-	p2 := maxpool2(c2, 16, 21, 29) // [16,10,14]
+	p2h, p2w := h2/2, w2/2
+	p2 := maxpool2(c2, 16, h2, w2)
 
-	// conv3: -> [24,8,12]
-	c3 := conv3x3(p2, 16, 10, 14, n.conv3W, n.conv3B, 24)
+	// conv3: -> [24,p2h-2,p2w-2]
+	c3 := conv3x3(p2, 16, p2h, p2w, n.conv3W, n.conv3B, 24)
+	h3, w3 := p2h-2, p2w-2
 	relu(c3)
 
 	// GAP: [24]
 	gap := make([]float32, 24)
-	inv := float32(1.0 / float32(8*12))
+	inv := float32(1.0 / float32(h3*w3))
 	for ch := 0; ch < 24; ch++ {
 		var s float32
-		base := ch * 8 * 12
-		for i := 0; i < 8*12; i++ {
+		base := ch * h3 * w3
+		for i := 0; i < h3*w3; i++ {
 			s += c3[base+i]
 		}
 		gap[ch] = s * inv
@@ -318,28 +345,28 @@ func (n *Net) forward(x []float32) (logits, coords []float32) {
 	return logits, coords
 }
 
-// preprocess 把任意灰度帧转成 [1*48*64] 的输入向量：
-// 居中裁剪到 64:48 比例 + 最近邻缩放 + 归一化到 0~1。
-func preprocess(frame *image.Gray) []float32 {
+// preprocess 把任意灰度帧转成 [1*inH*64] 的输入向量：
+// 居中裁剪到 64:inH 比例 + 最近邻缩放 + 归一化到 0~1。
+func (n *Net) preprocess(frame *image.Gray) []float32 {
 	b := frame.Bounds()
 	W, H := b.Dx(), b.Dy()
 	// 居中裁剪窗口（源图上取多大区域）
 	var sx, sy, sw, sh int
-	if float64(W)/float64(H) > float64(InW)/float64(InH) {
+	if float64(W)/float64(H) > float64(InW)/float64(n.inH) {
 		sh = H
-		sw = H * InW / InH
+		sw = H * InW / n.inH
 		sx = (W - sw) / 2
 		sy = 0
 	} else {
 		sw = W
-		sh = W * InH / InW
+		sh = W * n.inH / InW
 		sx = 0
 		sy = (H - sh) / 2
 	}
 
-	out := make([]float32, InH*InW)
-	for y := 0; y < InH; y++ {
-		srcY := sy + y*sh/InH
+	out := make([]float32, n.inH*InW)
+	for y := 0; y < n.inH; y++ {
+		srcY := sy + y*sh/n.inH
 		row := (srcY-b.Min.Y)*frame.Stride - b.Min.X
 		dst := y * InW
 		for x := 0; x < InW; x++ {
@@ -350,30 +377,30 @@ func preprocess(frame *image.Gray) []float32 {
 	return out
 }
 
-// preprocessRGB 把任意彩色帧转成 [3*48*64] 的输入向量（R 平面→G 平面→B 平面，
+// preprocessRGB 把任意彩色帧转成 [3*inH*64] 的输入向量（R 平面→G 平面→B 平面，
 // 与 conv3x3 的 ic*inH*inW 通道优先布局一致）。裁剪/缩放几何与 preprocess 完全相同
 // ——唯一区别是每像素取 RGB 三值而非灰度单值。数值路径对齐 train.py 的
 // PIL convert("RGB") + transpose(2,0,1)：/255 后按 [3,H,W] 平铺。
-func preprocessRGB(img image.Image) []float32 {
+func (n *Net) preprocessRGB(img image.Image) []float32 {
 	b := img.Bounds()
 	W, H := b.Dx(), b.Dy()
 	var sx, sy, sw, sh int
-	if float64(W)/float64(H) > float64(InW)/float64(InH) {
+	if float64(W)/float64(H) > float64(InW)/float64(n.inH) {
 		sh = H
-		sw = H * InW / InH
+		sw = H * InW / n.inH
 		sx = (W - sw) / 2
 		sy = 0
 	} else {
 		sw = W
-		sh = W * InH / InW
+		sh = W * n.inH / InW
 		sx = 0
 		sy = (H - sh) / 2
 	}
 
-	plane := InH * InW
+	plane := n.inH * InW
 	out := make([]float32, 3*plane)
-	for y := 0; y < InH; y++ {
-		srcY := sy + y*sh/InH
+	for y := 0; y < n.inH; y++ {
+		srcY := sy + y*sh/n.inH
 		dst := y * InW
 		for x := 0; x < InW; x++ {
 			srcX := sx + x*sw/InW
