@@ -8,44 +8,92 @@
   "buttons": [
     {
       "name": "pk_contest",
-      "aliases": ["pk", "contest", "对战", "比赛"],
-      "pos": [0.678, 0.845],
+      "aliases": [
+        "pk",
+        "contest",
+        "对战",
+        "比赛"
+      ],
+      "pos": [
+        0.678,
+        0.845
+      ],
       "note": "房间主界面右下角的 PK CONTEST 圆形入口。实测点它进 THEME（主题）选择页，是本作**唯一不依赖随机通知/邀请**的确定性入口。本机真机 1080x2340 标定。"
     },
     {
       "name": "start",
-      "aliases": ["begin", "开始"],
-      "pos": [0.500, 0.794],
+      "aliases": [
+        "begin",
+        "开始"
+      ],
+      "pos": [
+        0.5,
+        0.794
+      ],
       "note": "THEME 选择页底部的 Start 按钮。实测点它进 matching（匹配）页，倒计时约 11~17s 后自动进选装页。"
     },
     {
       "name": "pick_left",
-      "aliases": ["左卡", "选项1", "option1"],
-      "pos": [0.224, 0.782],
+      "aliases": [
+        "左卡",
+        "选项1",
+        "option1"
+      ],
+      "pos": [
+        0.224,
+        0.782
+      ],
       "note": "选装卡片三选一中最左一张。卡片区实测 y∈[0.734,0.858]（中心约 0.796），三卡中心 x≈0.224 / 0.500 / 0.776。**点一下即确认**，无二次提交键。"
     },
     {
       "name": "pick_mid",
-      "aliases": ["中卡", "选项2", "option2"],
-      "pos": [0.500, 0.782],
+      "aliases": [
+        "中卡",
+        "选项2",
+        "option2"
+      ],
+      "pos": [
+        0.5,
+        0.782
+      ],
       "note": "选装卡片三选一中间一张。plan 固定点这一张（三选一都要玩家自决，本作无「正确选项」提示，故固定一条可复现路径）。"
     },
     {
       "name": "pick_right",
-      "aliases": ["右卡", "选项3", "option3"],
-      "pos": [0.776, 0.782],
+      "aliases": [
+        "右卡",
+        "选项3",
+        "option3"
+      ],
+      "pos": [
+        0.776,
+        0.782
+      ],
       "note": "选装卡片三选一最右一张。"
     },
     {
       "name": "no_thanks",
-      "aliases": ["skip_ad", "不领取"],
-      "pos": [0.500, 0.921],
+      "aliases": [
+        "skip_ad",
+        "不领取"
+      ],
+      "pos": [
+        0.5,
+        0.921
+      ],
       "note": "VICTORY 未领奖态结算页底部的 NO Thanks 文字按钮——**唯一安全出口**。⚠️ 同页的 `❤<金额>`（带 ▶ 播放标）= 看广告翻倍，plan **永不点**。⚠️ 本按钮 y 随金额位数浮动（实测 0.921 与 0.954 两值），判据请用锚点勿写死。⚠️ 该页整体拒绝注入输入，plan 不使用此按钮（见 hints）。"
     },
     {
       "name": "result_home",
-      "aliases": ["home", "exit", "回主界面"],
-      "pos": [0.500, 0.833],
+      "aliases": [
+        "home",
+        "exit",
+        "回主界面"
+      ],
+      "pos": [
+        0.5,
+        0.833
+      ],
       "note": "结算页（已领奖态）的 Home 按钮。⚠️ FAIL 页则是 Home(约 y=0.769) + Reselect(约 y=0.845) 两个药丸，布局与 VICTORY 不同。⚠️ **实测注入点击无效**（Home tap Δ=1.7~2.8、+POST Δ=4.1、返回键 Δ=3.3、mouse source Δ=4.8，而同页未领奖态 NO Thanks Δ≈90.8），复位只能靠外部 `am force-stop` + `monkey` 冷启动（≈25~30s，爱心进度不丢）。此按钮仅作界面知识记录。"
     }
   ],
@@ -78,10 +126,19 @@
         "action": "ACTION PRESS name=pk_contest",
         "until": {
           "type": "ratio",
-          "region": [0.14, 0.100, 0.86, 0.150],
-          "color": [19, 19, 19],
+          "region": [
+            0.14,
+            0.1,
+            0.86,
+            0.15
+          ],
+          "color": [
+            19,
+            19,
+            19
+          ],
           "tolerance": 12,
-          "min_ratio": 0.30
+          "min_ratio": 0.3
         },
         "timeout_ms": 8000,
         "on_timeout": "ACTION PRESS name=pk_contest",
@@ -93,15 +150,33 @@
         "action": "ACTION PRESS name=start",
         "when": {
           "type": "ratio",
-          "region": [0.14, 0.100, 0.86, 0.150],
-          "color": [19, 19, 19],
+          "region": [
+            0.14,
+            0.1,
+            0.86,
+            0.15
+          ],
+          "color": [
+            19,
+            19,
+            19
+          ],
           "tolerance": 12,
-          "min_ratio": 0.30
+          "min_ratio": 0.3
         },
         "until": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
           "min_ratio": 0.35
         },
@@ -109,41 +184,77 @@
         "strict": false
       },
       {
-        "name": "选装·第 1 关：点中间选项（点即确认）。前置条件=底部卡片可见。判据=卡片消失（离开选装页）。⚠️ 预算 12s + 只补按 1 轮：真选装页实测 0.6~2.9s 就响应，而**浅色广告会让本判据假成立**（实测读到 38%），短预算 + 紧跟清广告把误伤压到最小",
+        "name": "选装·第 1 关：点中间选项（点即确认）。前置条件=底部卡片可见。判据=卡片消失（离开选装页）。⚠️ 2026-09-16 实测：环节切换后首次注入点击会被吞（s13 第 2 关点击后 11.9s 才切页=倒计时随机穿，f0016 证实穿的是中卡而非左卡）⇒ 改循环补点：卡片仍在就每 2.5s 重点同卡，最多 4 次（约 10s 内），点中（卡片消失）即停——幂等：补点只会发生在未选中的当前环节。",
         "action": "ACTION PRESS name=pick_mid",
         "when": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
           "min_ratio": 0.35
         },
         "until": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
-          "max_ratio": 0.20
+          "max_ratio": 0.2
         },
-        "timeout_ms": 12000,
-        "on_timeout": "ACTION PRESS name=pick_mid",
-        "comp_retries": 1,
-        "strict": false
+        "timeout_ms": 13000,
+        "strict": false,
+        "max_repeat": 4,
+        "gap_ms": 2500
       },
       {
         "name": "清广告·A（**唯一允许按返回键的一步**）：前置条件=顶部票数条判据 <0.05，即画面既不是 PK 场景也不是匹配/结算页（广告页 0.0%、主界面 0.7%、THEME 0.0%）——此时按返回键才安全。判据=票数条 ≥0.15（回到 PK 场景）。最多 3 次、每次间隔 2s。⚠️ 在结算页（23~58%）/选装页（41~54%）/匹配页（58%）上前置条件不成立、整步跳过 ⇒ **永远不会在结算页按返回键**",
         "action": "ACTION KEY code=back",
         "when": {
           "type": "ratio",
-          "region": [0.20, 0.090, 0.50, 0.115],
-          "color": [255, 140, 250],
+          "region": [
+            0.2,
+            0.09,
+            0.5,
+            0.115
+          ],
+          "color": [
+            255,
+            140,
+            250
+          ],
           "tolerance": 50,
           "max_ratio": 0.05
         },
         "until": {
           "type": "ratio",
-          "region": [0.20, 0.090, 0.50, 0.115],
-          "color": [255, 140, 250],
+          "region": [
+            0.2,
+            0.09,
+            0.5,
+            0.115
+          ],
+          "color": [
+            255,
+            140,
+            250
+          ],
           "tolerance": 50,
           "min_ratio": 0.15
         },
@@ -153,41 +264,77 @@
         "strict": false
       },
       {
-        "name": "选装·第 2 关（实测一局 PK = 2 关；若本局只有 1 关，上一步已让卡片消失，本步 when 不成立、整步跳过——幂等，不会多点）",
+        "name": "选装·第 2 关（实测一局 PK = 2 关；若本局只有 1 关，上一步已让卡片消失，本步 when 不成立、整步跳过——幂等，不会多点）。⚠️ 2026-09-16 实测：环节切换后首次注入点击会被吞（s13 第 2 关点击后 11.9s 才切页=倒计时随机穿，f0016 证实穿的是中卡而非左卡）⇒ 改循环补点：卡片仍在就每 2.5s 重点同卡，最多 4 次（约 10s 内），点中（卡片消失）即停——幂等：补点只会发生在未选中的当前环节。",
         "action": "ACTION PRESS name=pick_mid",
         "when": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
           "min_ratio": 0.35
         },
         "until": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
-          "max_ratio": 0.20
+          "max_ratio": 0.2
         },
-        "timeout_ms": 12000,
-        "on_timeout": "ACTION PRESS name=pick_mid",
-        "comp_retries": 1,
-        "strict": false
+        "timeout_ms": 13000,
+        "strict": false,
+        "max_repeat": 4,
+        "gap_ms": 2500
       },
       {
         "name": "清广告·B（判据与 A 相同：票数条 <0.05 才按返回键）",
         "action": "ACTION KEY code=back",
         "when": {
           "type": "ratio",
-          "region": [0.20, 0.090, 0.50, 0.115],
-          "color": [255, 140, 250],
+          "region": [
+            0.2,
+            0.09,
+            0.5,
+            0.115
+          ],
+          "color": [
+            255,
+            140,
+            250
+          ],
           "tolerance": 50,
           "max_ratio": 0.05
         },
         "until": {
           "type": "ratio",
-          "region": [0.20, 0.090, 0.50, 0.115],
-          "color": [255, 140, 250],
+          "region": [
+            0.2,
+            0.09,
+            0.5,
+            0.115
+          ],
+          "color": [
+            255,
+            140,
+            250
+          ],
           "tolerance": 50,
           "min_ratio": 0.15
         },
@@ -197,41 +344,77 @@
         "strict": false
       },
       {
-        "name": "选装·第 3 关（防御性冗余：关卡数不定已实测——返回键实测能把卡片重新调出来；无卡片则整步跳过，幂等）",
+        "name": "选装·第 3 关（防御性冗余：关卡数不定已实测——返回键实测能把卡片重新调出来；无卡片则整步跳过，幂等）。⚠️ 2026-09-16 实测：环节切换后首次注入点击会被吞（s13 第 2 关点击后 11.9s 才切页=倒计时随机穿，f0016 证实穿的是中卡而非左卡）⇒ 改循环补点：卡片仍在就每 2.5s 重点同卡，最多 4 次（约 10s 内），点中（卡片消失）即停——幂等：补点只会发生在未选中的当前环节。",
         "action": "ACTION PRESS name=pick_mid",
         "when": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
           "min_ratio": 0.35
         },
         "until": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
-          "max_ratio": 0.20
+          "max_ratio": 0.2
         },
-        "timeout_ms": 12000,
-        "on_timeout": "ACTION PRESS name=pick_mid",
-        "comp_retries": 1,
-        "strict": false
+        "timeout_ms": 13000,
+        "strict": false,
+        "max_repeat": 4,
+        "gap_ms": 2500
       },
       {
         "name": "清广告·C（判据与 A 相同）",
         "action": "ACTION KEY code=back",
         "when": {
           "type": "ratio",
-          "region": [0.20, 0.090, 0.50, 0.115],
-          "color": [255, 140, 250],
+          "region": [
+            0.2,
+            0.09,
+            0.5,
+            0.115
+          ],
+          "color": [
+            255,
+            140,
+            250
+          ],
           "tolerance": 50,
           "max_ratio": 0.05
         },
         "until": {
           "type": "ratio",
-          "region": [0.20, 0.090, 0.50, 0.115],
-          "color": [255, 140, 250],
+          "region": [
+            0.2,
+            0.09,
+            0.5,
+            0.115
+          ],
+          "color": [
+            255,
+            140,
+            250
+          ],
           "tolerance": 50,
           "min_ratio": 0.15
         },
@@ -241,41 +424,77 @@
         "strict": false
       },
       {
-        "name": "选装·第 4 关（同样幂等：有卡片才点，无卡片整步跳过）",
+        "name": "选装·第 4 关（同样幂等：有卡片才点，无卡片整步跳过）。⚠️ 2026-09-16 实测：环节切换后首次注入点击会被吞（s13 第 2 关点击后 11.9s 才切页=倒计时随机穿，f0016 证实穿的是中卡而非左卡）⇒ 改循环补点：卡片仍在就每 2.5s 重点同卡，最多 4 次（约 10s 内），点中（卡片消失）即停——幂等：补点只会发生在未选中的当前环节。",
         "action": "ACTION PRESS name=pick_mid",
         "when": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
           "min_ratio": 0.35
         },
         "until": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
-          "max_ratio": 0.20
+          "max_ratio": 0.2
         },
-        "timeout_ms": 12000,
-        "on_timeout": "ACTION PRESS name=pick_mid",
-        "comp_retries": 1,
-        "strict": false
+        "timeout_ms": 13000,
+        "strict": false,
+        "max_repeat": 4,
+        "gap_ms": 2500
       },
       {
         "name": "清广告·D（最后一次清广告：把「选完最后一关才弹的插屏」清掉，之后演出跑完就会出结算页）",
         "action": "ACTION KEY code=back",
         "when": {
           "type": "ratio",
-          "region": [0.20, 0.090, 0.50, 0.115],
-          "color": [255, 140, 250],
+          "region": [
+            0.2,
+            0.09,
+            0.5,
+            0.115
+          ],
+          "color": [
+            255,
+            140,
+            250
+          ],
           "tolerance": 50,
           "max_ratio": 0.05
         },
         "until": {
           "type": "ratio",
-          "region": [0.20, 0.090, 0.50, 0.115],
-          "color": [255, 140, 250],
+          "region": [
+            0.2,
+            0.09,
+            0.5,
+            0.115
+          ],
+          "color": [
+            255,
+            140,
+            250
+          ],
           "tolerance": 50,
           "min_ratio": 0.15
         },
@@ -289,8 +508,17 @@
         "action": "ACTION WAIT",
         "until": {
           "type": "ratio",
-          "region": [0.14, 0.150, 0.86, 0.200],
-          "color": [255, 255, 255],
+          "region": [
+            0.14,
+            0.15,
+            0.86,
+            0.2
+          ],
+          "color": [
+            255,
+            255,
+            255
+          ],
           "tolerance": 4,
           "min_ratio": 0.07
         },
@@ -302,15 +530,33 @@
         "action": "ACTION WAIT",
         "when": {
           "type": "ratio",
-          "region": [0.200, 0.090, 0.500, 0.115],
-          "color": [255, 140, 250],
+          "region": [
+            0.2,
+            0.09,
+            0.5,
+            0.115
+          ],
+          "color": [
+            255,
+            140,
+            250
+          ],
           "tolerance": 50,
-          "min_ratio": 0.10
+          "min_ratio": 0.1
         },
         "until": {
           "type": "ratio",
-          "region": [0.840, 0.022, 0.915, 0.065],
-          "color": [255, 200, 60],
+          "region": [
+            0.84,
+            0.022,
+            0.915,
+            0.065
+          ],
+          "color": [
+            255,
+            200,
+            60
+          ],
           "tolerance": 45,
           "max_ratio": 0.005
         },
@@ -322,17 +568,35 @@
         "action": "ACTION WAIT",
         "when": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
           "min_ratio": 0.35
         },
         "until": {
           "type": "ratio",
-          "region": [0.15, 0.730, 0.85, 0.800],
-          "color": [238, 241, 245],
+          "region": [
+            0.15,
+            0.73,
+            0.85,
+            0.8
+          ],
+          "color": [
+            238,
+            241,
+            245
+          ],
           "tolerance": 10,
-          "max_ratio": 0.20
+          "max_ratio": 0.2
         },
         "timeout_ms": 1500,
         "strict": true
@@ -342,8 +606,17 @@
         "action": "ACTION WAIT",
         "until": {
           "type": "ratio",
-          "region": [0.14, 0.150, 0.86, 0.200],
-          "color": [255, 255, 255],
+          "region": [
+            0.14,
+            0.15,
+            0.86,
+            0.2
+          ],
+          "color": [
+            255,
+            255,
+            255
+          ],
           "tolerance": 4,
           "min_ratio": 0.07
         },
