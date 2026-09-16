@@ -111,7 +111,8 @@ def load_demos(data_dir: Path, recursive: bool) -> tuple[list[dict], dict]:
                     continue
                 img = Image.open(frame_path).convert("L")
                 arr = center_crop_resize(img, 64, 48)
-                samples.append({"frame": arr, "cls": CLS.index(kind), "x": x, "y": y})
+                samples.append({"frame": arr, "cls": CLS.index(kind), "x": x, "y": y,
+                                "pref": s.get("label") or ""})
                 mapped[kind] += 1
                 n_ok += 1
         print(f"  {tj.parent.name}: {n_ok} 个有效样本")
@@ -471,6 +472,10 @@ def main() -> None:
                     help="覆盖 CLASS_WEIGHTS 单项，格式 name=value 逗号分隔（如 tap=2.0,none=1.0）。"
                          "默认权重按「老师示范 none 占大头」设计；跑批采集的分布相反时必须覆盖，"
                          "否则学生会塌缩到高权重类（2026-09-16 实测：tap1.5/none0.5 配 11:22 样本 → 全猜 tap）。")
+    ap.add_argument("--preference-weights", default="",
+                    help="按示范行的局级 label 加权样本，格式 LABEL=value 逗号分隔（如 WIN=1.0,FAIL=0.3）。"
+                         "离线偏好学习：胜局动作示范加权、败局示范降权。未列出的 label 与缺省行权重 1.0。"
+                         "不传该参数时行为与旧版完全一致。")
     ap.add_argument("--val-frac", type=float, default=0.2,
                     help="分层切分的验证集比例（按类别内比例取，每类至少留 1 条在训练集）")
     args = ap.parse_args()
@@ -515,6 +520,25 @@ def main() -> None:
         print("  类别权重覆盖: " + ", ".join(
             f"{CLS[i]}={cls_w[i]:g}" for i in range(len(CLS)) if cls_w[i] != CLASS_WEIGHTS[i]))
 
+    # 离线偏好学习：按示范行的局级 label（WIN/FAIL/...）加权每个样本。
+    # 未列出/缺省 label 权重 1.0 ⇒ 不传 --preference-weights 时与旧版数值完全等价。
+    pref_w = torch.ones(len(samples))
+    if args.preference_weights:
+        pw_map: dict[str, float] = {}
+        for kv in args.preference_weights.split(","):
+            name, _, val = kv.partition("=")
+            name, val = name.strip(), val.strip()
+            if not name or not val:
+                sys.exit(f"--preference-weights 项无效: {kv!r}（应为 LABEL=value，如 WIN=1.0,FAIL=0.3）")
+            pw_map[name] = float(val)
+        n_by_label: Counter = Counter()
+        for i, s in enumerate(samples):
+            lab = str(s.get("pref") or "")
+            pref_w[i] = pw_map.get(lab, 1.0)
+            n_by_label[lab or "(缺省)"] += 1
+        print("  偏好加权: " + ", ".join(f"{k}={v:g}" for k, v in pw_map.items())
+              + " | 样本分布: " + ", ".join(f"{k}={n}" for k, n in sorted(n_by_label.items())))
+
     model = build_model(args.hidden)
     parent_meta: dict = {}
     if args.init:
@@ -531,7 +555,6 @@ def main() -> None:
         print("已冻结三层卷积，本轮只训 fc / cls_head / coord_head")
     # 只把需要梯度的参数交给优化器（冻结骨干时不更新卷积）
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
-    cls_loss_fn = nn.CrossEntropyLoss(weight=cls_w)
     coord_loss_fn = nn.SmoothL1Loss(reduction="none")
 
     # 多数类基线：val 上最大类占比。val_acc 不显著高于它 = 没有决策能力。
@@ -550,10 +573,13 @@ def main() -> None:
         for b0 in range(0, len(perm), args.batch):
             bi = perm[b0:b0 + args.batch]
             logits, coords = model(frames[bi])
-            l_cls = cls_loss_fn(logits, cls[bi])
+            # 逐样本加权（类权重 × 偏好权重），按权重和归一 ⇒ 等价于旧的加权平均语义
+            l_cls_vec = nn.functional.cross_entropy(logits, cls[bi], weight=cls_w, reduction="none")
+            l_cls = (l_cls_vec * pref_w[bi]).sum() / pref_w[bi].sum().clamp_min(1e-8)
             if xy_mask[bi].sum() > 0:
                 lc = coord_loss_fn(coords, xy[bi]).mean(dim=1)
-                l_xy = (lc * xy_mask[bi]).sum() / xy_mask[bi].sum()
+                w = xy_mask[bi] * pref_w[bi]
+                l_xy = (lc * w).sum() / w.sum().clamp_min(1e-8)
             else:
                 l_xy = torch.tensor(0.0)
             loss = l_cls + 0.3 * l_xy
