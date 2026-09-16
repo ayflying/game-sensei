@@ -467,6 +467,10 @@ def main() -> None:
     ap.add_argument("--note", default="", help="写入 meta.note 的标注（如标签质量说明）")
     ap.add_argument("--allow-missing-classes", action="store_true",
                     help="允许 CLS 里存在 0 样本的类（只求跑通链路时用；空类清单会写进 meta）")
+    ap.add_argument("--override-class-weights", default="",
+                    help="覆盖 CLASS_WEIGHTS 单项，格式 name=value 逗号分隔（如 tap=2.0,none=1.0）。"
+                         "默认权重按「老师示范 none 占大头」设计；跑批采集的分布相反时必须覆盖，"
+                         "否则学生会塌缩到高权重类（2026-09-16 实测：tap1.5/none0.5 配 11:22 样本 → 全猜 tap）。")
     ap.add_argument("--val-frac", type=float, default=0.2,
                     help="分层切分的验证集比例（按类别内比例取，每类至少留 1 条在训练集）")
     args = ap.parse_args()
@@ -501,6 +505,15 @@ def main() -> None:
     xy_mask = torch.tensor([CLS[c] == "tap" for c in cls.tolist()], dtype=torch.float32)
 
     cls_w = torch.tensor(CLASS_WEIGHTS)
+    if args.override_class_weights:
+        for kv in args.override_class_weights.split(","):
+            name, _, val = kv.partition("=")
+            name = name.strip()
+            if name not in CLS or not val:
+                sys.exit(f"--override-class-weights 项无效: {kv!r}（应为 name=value，name ∈ CLS）")
+            cls_w[CLS.index(name)] = float(val)
+        print("  类别权重覆盖: " + ", ".join(
+            f"{CLS[i]}={cls_w[i]:g}" for i in range(len(CLS)) if cls_w[i] != CLASS_WEIGHTS[i]))
 
     model = build_model(args.hidden)
     parent_meta: dict = {}

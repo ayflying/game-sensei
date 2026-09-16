@@ -333,3 +333,22 @@ Store 三档价格（本轮补齐数值）：**NO ADS US$1.99**（永久去弹�
 
 ⇒ 结论：**14 项玩法全部覆盖，无残留卡点**。新增工具：`phone/dot_probe.py`（全局+局部 Δ）、`phone/px.py`（区域色占比）、`phone/crop.py`（裁切放大定位）；
 新增方法论：判「注入被吞」必须先做「crop 放大核对坐标 → 局部 Δ/色占比」两步排除（全局 Δ 对小控件必然失效，1080×2340 上心形变红只值 0.1）。
+
+### 12.17 训练样本自动采集与学生模型首训（2026-09-16）
+
+**目标**：把「跑批」升级为「边跑边攒训练数据」，打通 采集→训练→Go 加载→Decide 全链路。
+
+**采集（`plan_round.py` 内置，默认开启，`--no-trainset` 关闭）**：
+- plan 执行期间后台线程每 2.5s 旁路抓一帧（`exec-out screencap -p` → 540 宽 JPEG），存 `runs/<轮>/stream/`；失败静默跳过，绝不影响跑批。
+- 跑完后按判据（从档案读）把帧流打包成 `trainset/<tag>/trajectory.jsonl + frames/`——**格式完全对齐 `trainer/train.py` 的 `load_demos`，训练器零改动**：
+  - 选装页帧（卡片灰 ratio≥0.35，按时间断隔 >8s 聚段=按关卡切）→ `kind=tap, nx/ny=档案 pick 按钮坐标`（有坐标监督）；
+  - 非选装页帧抽样（≤2× 正样本数）→ `kind=none`（学「不该点」）；
+  - 每行附 `label`（本轮 WIN/FAIL/UNDECIDED），train.py 忽略之，留给将来偏好加权。
+- 实测 5 轮（s01~s05）：33 样本（tap 11 / none 22），label 覆盖 WIN/FAIL/UNDECIDED。
+
+**首训（`trainer/train.py --data trainset --recursive`）**：
+- 新增 `--override-class-weights` 参数：默认 CLASS_WEIGHTS 按「老师示范 none 占大头」设计（tap 1.5/none 0.5），与跑批采集的分布相反 ⇒ v1 塌缩全猜 tap（val_acc 33% < 基线 67%）。v2 用反比权重（tap=2/none=1）后反向塌缩到 none（66.7% = 恰好基线）。
+- **坐标头真实收敛**：tap 坐标误差 0.163→0.01，Go 侧 Decide 输出 (0.508,0.768) vs 标签 (0.5,0.782) 误差 ~0.02。
+- **分类头无决策力（如实记录）**：33 样本、none 大半是 PK 演出页（与选装页视觉接近），64×48 灰度 3 层 CNN 分不开。**v2 权重=链路验证版，不是能力交付**。提升路径：①STREAM_INTERVAL 降到 1.2s 多抓选装帧 ②样本 100+ 后重训 ③必要时彩色输入（改网络）。
+
+**链路证据**：`go run ./.workbuddy/stucheck models/yoyastar_pick_v2.weights.json <帧...>` 加载+推理全通（val_acc=0.67, hidden=64）。
