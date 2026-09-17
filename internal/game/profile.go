@@ -161,6 +161,16 @@ type Profile struct {
 	BattleDetect *BattleDetect `json:"battle_detect,omitempty"`
 	// Escape 卡死自愈脚本（可选）。见 EscapeProfile。
 	Escape *EscapeProfile `json:"escape,omitempty"`
+	// StudentSemantics 把学生模型的「命名按钮语义类」映射到本档案的按钮名：
+	// 类名 -> 按钮名（如 "tap_pk": "pk_contest"）。类名集合是学生类空间中的
+	// tap_pk/tap_start/tap_pick（见 trainer/train.py CLS 尾部）；具体指向哪个
+	// 按钮是**档案知识**，换游戏只改这里，Go 不动。
+	//
+	// 为什么需要它：学生只学「画面 -> 语义动作」（视觉泛化），不知道也不该知道
+	// 本地按钮坐标；坐标由档案负责落地（cmd/helper 的 classToAction 查 Button()）。
+	// 未配置时这些类不可落地——学生输出会退化为 WAIT 且在日志可见，不会静默乱点
+	// （宁可不点，不能点错）。
+	StudentSemantics map[string]string `json:"student_semantics,omitempty"`
 	// Plan 可选的**确定性执行计划**：把已经摸清的操作流程固化成步骤序列，
 	// 由 internal/plan 的执行器零模型跑完，不再调用老师 VLM（省钱、提速）。
 	//
@@ -564,6 +574,20 @@ func (p *Profile) normalize() error {
 			if (s.To[0] != 0 || s.To[1] != 0) && (!inUnitRange(s.To[0]) || !inUnitRange(s.To[1])) {
 				return fmt.Errorf("宏 %q 的 steps[%d] 的 to 必须是 0~1 的归一化坐标", m.Name, j)
 			}
+		}
+	}
+
+	// 学生语义映射：值必须指向已定义的**按钮**（classToAction 走 Button() 查坐标）。
+	// 拼错按钮名会让「学生输出该语义类」退化成 WAIT，装载期报错则立刻可见——
+	// 与按钮/宏校验同一原则：不许静默退化。
+	for cls, name := range p.StudentSemantics {
+		name = strings.ToLower(strings.TrimSpace(name))
+		p.StudentSemantics[cls] = name
+		if name == "" {
+			return fmt.Errorf("student_semantics[%q] 的按钮名为空", cls)
+		}
+		if _, ok := p.Button(name); !ok {
+			return fmt.Errorf("student_semantics[%q] 指向的 %q 不是已定义的按钮", cls, name)
 		}
 	}
 

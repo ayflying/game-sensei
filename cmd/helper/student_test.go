@@ -14,9 +14,28 @@ import (
 	"github.com/ayflying/game-sensei/internal/student"
 )
 
+// semanticProfile 是配了 student_semantics 的最小档案：
+// 三个语义类各指向一个按钮（坐标任意但可辨认，用于断言「落地的是档案坐标」）。
+func semanticProfile() *game.Profile {
+	return &game.Profile{
+		Buttons: []game.Button{
+			{Name: "pk_contest", Pos: [2]float64{0.678, 0.845}},
+			{Name: "start", Pos: [2]float64{0.5, 0.794}},
+			{Name: "pick_mid", Pos: [2]float64{0.5, 0.782}},
+		},
+		StudentSemantics: map[string]string{
+			"tap_pk": "pk_contest", "tap_start": "start", "tap_pick": "pick_mid",
+		},
+	}
+}
+
 // TestClassToAction穷举全部类别 保证没有类别落进「未识别」分支。
+//
+// 语义类（tap_pk/tap_start/tap_pick）的落点是档案知识（student_semantics 映射到
+// 按钮），所以穷举必须给配好映射的档案；「档案没配」这个负例由
+// TestClassToAction语义类缺档案映射不瞎点 单独固化（ok=false，不静默退化）。
 func TestClassToAction穷举全部类别(t *testing.T) {
-	prof := &game.Profile{}
+	prof := semanticProfile()
 	for _, c := range student.Classes {
 		if _, ok := classToAction(c, 0.5, 0.5, prof); !ok {
 			t.Fatalf("类别 %q 没有映射到 L1 动作（会静默退化成 WAIT）", c)
@@ -25,6 +44,43 @@ func TestClassToAction穷举全部类别(t *testing.T) {
 	// 真·未知类别必须被识别为未知，而不是悄悄当 WAIT
 	if _, ok := classToAction("bogus", 0.5, 0.5, prof); ok {
 		t.Fatal("未知类别应当返回 ok=false")
+	}
+}
+
+// TestClassToAction语义类坐标来自档案 保证语义类落地的是**档案坐标**——
+// 学生回归头对语义类不被消费（它只管看画面说「点哪个语义按钮」）。
+func TestClassToAction语义类坐标来自档案(t *testing.T) {
+	prof := semanticProfile()
+	// 刻意给一个错误的回归坐标，断言它不被采用
+	act, ok := classToAction("tap_pk", 0.1, 0.2, prof)
+	if !ok {
+		t.Fatal("tap_pk 未被识别")
+	}
+	if act.Kind != agent.ActionTap || act.Nx != 0.678 || act.Ny != 0.845 {
+		t.Fatalf("tap_pk 落点 = (%v, %.3f, %.3f)，期望 (Tap, 0.678, 0.845) 即档案坐标",
+			act.Kind, act.Nx, act.Ny)
+	}
+
+	// back：系统返回键（导航广告场景）
+	act, ok = classToAction("back", 0, 0, prof)
+	if !ok || act.Kind != agent.ActionKey || act.Code != "back" {
+		t.Fatalf("back 落点 = (%v,%q)，期望 (ActionKey, back)", act.Kind, act.Code)
+	}
+}
+
+// TestClassToAction语义类缺档案映射不瞎点 固化「宁可不点，不能点错」：
+// 档案没配 student_semantics（或按钮名拼错）时必须 ok=false，由 Decide 打可见警告。
+func TestClassToAction语义类缺档案映射不瞎点(t *testing.T) {
+	profs := map[string]*game.Profile{
+		"nil 档案":               nil,
+		"空档案":                 {},
+		"有按钮但无 student_semantics": {Buttons: []game.Button{{Name: "pk_contest", Pos: [2]float64{0.678, 0.845}}}},
+		"映射指向不存在的按钮":           {StudentSemantics: map[string]string{"tap_pk": "nope"}},
+	}
+	for name, prof := range profs {
+		if _, ok := classToAction("tap_pk", 0.5, 0.5, prof); ok {
+			t.Fatalf("%s：tap_pk 竟然可落地（会点到错误坐标或空点）", name)
+		}
 	}
 }
 

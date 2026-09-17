@@ -54,10 +54,11 @@ func (s *studentActor) Decide(img image.Image) (agent.Action, error) {
 	}
 	act, ok := classToAction(out.Class, out.X, out.Y, s.prof)
 	if !ok {
-		// 未知类别不能静默变成「什么都不做」——那会让「权重与代码版本不匹配」
-		// 这种严重问题表现成「模型有点笨」，没人会去查。student.Load 已校验
-		// 类别顺序，正常不会走到这里；真走到了就必须在日志里可见。
-		fmt.Printf("⚠️ 学生输出未知类别 %q（权重与代码类别不匹配？）本步按 WAIT 处理\n", out.Class)
+		// 无法映射不能静默变成「什么都不做」——那会让「权重与代码版本不匹配」
+		// 或「档案缺 student_semantics 映射」这种严重问题表现成「模型有点笨」，
+		// 没人会去查。student.Load 已校验类别顺序，正常不会走到这里；
+		// 真走到了就必须在日志里可见。
+		fmt.Printf("⚠️ 学生类别 %q 无法映射为动作（权重类别不匹配，或档案缺 student_semantics 映射？）本步按 WAIT 处理\n", out.Class)
 		return agent.Action{Kind: agent.ActionNone}, nil
 	}
 	return act, nil
@@ -67,8 +68,13 @@ func (s *studentActor) Decide(img image.Image) (agent.Action, error) {
 //
 //	8 向（与 agent.AllDirs 同集合）-> ActionMove（档案决定落地成摇杆还是 WASD）
 //	tap                        -> ActionTap（学生回归的归一化坐标）
+//	tap_pk/tap_start/tap_pick  -> ActionTap（坐标从档案 student_semantics 查按钮）
+//	back                       -> ActionKey（系统返回键，导航广告场景）
 //	press                      -> ActionPress（按档案第一个按钮）
 //	wait / none                -> ActionNone
+//
+// 无法落地（未知类名、档案未配 student_semantics、按钮名拼错）一律返回
+// ok=false，由 Decide 打可见警告并按 WAIT 处理——不许静默乱点。
 //
 // ⚠️ 已知天花板（press）：学生头只输出「按一下」这个意图，不带按钮名，
 // 这里只能退回「按档案 Buttons[0]」。老师的战斗宏（聚能/赫突/逃跑）都是
@@ -85,6 +91,30 @@ func classToAction(cls string, x, y float64, prof *game.Profile) (agent.Action, 
 		}, true
 	case "tap":
 		return agent.Action{Kind: agent.ActionTap, Nx: x, Ny: y}, true
+	case "tap_pk", "tap_start", "tap_pick":
+		// 命名按钮语义类（端到端扩展 2026-09-16）：学生输出「点哪个语义按钮」，
+		// 坐标由档案的 student_semantics 映射到按钮名再查坐标——学生只管看画面
+		// 决策，坐标是档案知识（换游戏只改 JSON）。档案没配或按钮名拼错时不猜，
+		// 返回 false 让 Decide 打可见警告（宁可不点，不能点错）。
+		if prof == nil {
+			return agent.Action{}, false
+		}
+		name, ok := prof.StudentSemantics[cls]
+		if !ok {
+			return agent.Action{}, false
+		}
+		b, ok := prof.Button(name)
+		if !ok {
+			return agent.Action{}, false
+		}
+		if b.Key != "" {
+			// PC 键盘档案：语义类落地成按该命名键（与 PRESS 同一条路径）。
+			return agent.Action{Kind: agent.ActionPress, Name: b.Name}, true
+		}
+		return agent.Action{Kind: agent.ActionTap, Nx: b.Pos[0], Ny: b.Pos[1]}, true
+	case "back":
+		// 系统返回键（导航广告场景）：L1 的 ActionKey 就是「按一下 Android back」。
+		return agent.Action{Kind: agent.ActionKey, Code: "back"}, true
 	case "press":
 		// 学生版本 1 不区分按钮名（按钮语义是档案知识，不是视觉知识）。
 		// 若档案有按钮，取档案顺序第一个；没有就退化为 WAIT，避免瞎按。

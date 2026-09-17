@@ -10,8 +10,10 @@ internal/student 纯 Go 前向传播加载——零 CGO、零外部依赖。
   - 权重文件是唯一接口，Python 侧导出顺序与 Go 侧加载顺序一一对应。
 
 学生输出两层（与 L1 动作空间对齐，跨游戏通用）：
-  - 分类头：12 类 = 8 向（与 internal/agent.AllDirs 同序）+ tap/press/wait/none
-  - 回归头：tap 的归一化坐标 (x, y)
+  - 分类头：16 类 = 8 向（与 internal/agent.AllDirs 同序）+ tap/press/wait/none
+    + 4 个端到端语义类：tap_pk/tap_start/tap_pick（命名按钮语义，坐标由
+    档案 student_semantics 落地）+ back（系统返回键，导航广告场景）
+  - 回归头：tap 的归一化坐标 (x, y)（命名类不消费回归坐标，仅通用 tap 用）
 
 用法：
   C:/Users/ay/.workbuddy/binaries/python/envs/default/Scripts/python.exe \
@@ -51,6 +53,10 @@ CLS = [
     "up", "down", "left", "right",
     "up_left", "up_right", "down_left", "down_right",
     "tap", "press", "wait", "none",
+    # 端到端扩展（2026-09-16）：命名按钮语义类 + 系统键类。
+    # 必须与 internal/student.Classes 逐项一致（Load 会校验，错位拒绝加载）。
+    # 尾部追加不改变前 12 类下标；旧 12 类权重会被长度校验拒绝（不能静默错位）。
+    "tap_pk", "tap_start", "tap_pick", "back",
 ]
 
 # 方向名集合（与 internal/agent.AllDirs 同集合；顺序见 CLS）。
@@ -58,7 +64,10 @@ DIRS = tuple(CLS[:8])
 
 # 类别权重：老师示范里 none/wait 常占大头，不加权学生会学会「永远不动」。
 # 权重只对**出现过的类**起作用；缺失类会被 --allow-missing-classes 显式点名。
-CLASS_WEIGHTS = np.array([0.3] * 8 + [1.5, 1.5, 0.5, 0.5], dtype=np.float32)
+# 端到端 4 个语义类（tap_pk/tap_start/tap_pick/back）与 tap/press 同为「行为类」，
+# 权重 1.5——样本量小、决策关键，不加权会被 none 淹没成「看不见」。
+CLASS_WEIGHTS = np.array(
+    [0.3] * 8 + [1.5, 1.5, 0.5, 0.5] + [1.5, 1.5, 1.5, 1.5], dtype=np.float32)
 assert len(CLASS_WEIGHTS) == len(CLS), "CLASS_WEIGHTS 长度必须与 CLS 一致"
 
 
@@ -157,7 +166,22 @@ def map_action(s: dict) -> tuple[str | None, float, float]:
     """
     kind = s.get("kind", "")
     if kind in ("tap", "hold"):
-        return "tap", float(s.get("nx", 0.5)), float(s.get("ny", 0.5))
+        # 语义 tap：action 形如 "tap:<按钮名>"（dataset 落盘约定）。
+        # 命名按钮语义类（端到端扩展 2026-09-16）：tap_pk/tap_start/tap_pick
+        # 各自映射到固定按钮语义，坐标由 Go 侧从档案 student_semantics 落地；
+        # 这里返回的 nx/ny 只是回归头的训练目标（对命名类不被消费）。
+        # 未识别的按钮名退回通用 tap（保持旧行为），不静默丢弃。
+        act = str(s.get("action", ""))
+        name = act.split(":", 1)[1].strip() if act.startswith("tap:") else ""
+        nx = float(s.get("nx", 0.5))
+        ny = float(s.get("ny", 0.5))
+        if name == "pk_contest":
+            return "tap_pk", nx, ny
+        if name == "start":
+            return "tap_start", nx, ny
+        if name.startswith("pick_"):
+            return "tap_pick", nx, ny
+        return "tap", nx, ny
     if kind in ("key", "press"):
         # key = 系统键；press = 按「命名按钮」（游戏档案里的按钮/宏）。
         # 两者都落进学生的 press 类——学生头目前只输出「按一下」这个意图，
@@ -166,6 +190,12 @@ def map_action(s: dict) -> tuple[str | None, float, float]:
         # 「按档案第一个按钮」，所以老师的战斗宏（聚能/赫突/逃跑）即便被学生
         # 学会了「此刻该按」，也按不对按钮。要真正复现战斗策略，得给学生加一个
         # 「按钮头」（对档案 Buttons 做多分类）——那是下一版的事，不是数据问题。
+        # back 类（端到端扩展 2026-09-16）：系统返回键，用于关导航广告
+        # （action 形如 "ACTION KEY code=back"）。token 精确匹配，不做子串。
+        act = str(s.get("action", ""))
+        toks = act.replace("=", " ").replace(":", " ").split()
+        if "back" in toks:
+            return "back", 0.0, 0.0
         return "press", 0.0, 0.0
     if kind == "joy":
         dx = float(s.get("nx2", 0.5)) - float(s.get("nx", 0.5))

@@ -32,10 +32,16 @@ import (
 // 4 向就无法表达老师实际发出的斜向移动（实测 nrc 真机示范的移动全是斜向），
 // 只能把 up_right/up_left 硬塞进 up，等于系统性错标。
 // 顺序漂移会让权重标签错位且**不会报错**，故 Load 会校验 arch.classes。
+//
+// 尾部 4 类（2026-09-16 端到端扩展）：tap_pk/tap_start/tap_pick 是「命名按钮
+// 语义类」——学生只输出「点哪个语义按钮」，坐标由档案（student_semantics）
+// 落地；back 是系统返回键（导航广告场景）。既有 12 类顺序保持不动，
+// 旧 12 类权重会被 Load 拒绝（长度/顺序校验），不会静默错位。
 var Classes = []string{
 	"up", "down", "left", "right",
 	"up_left", "up_right", "down_left", "down_right",
 	"tap", "press", "wait", "none",
+	"tap_pk", "tap_start", "tap_pick", "back",
 }
 
 // InW/InH 是网络输入的**默认**尺寸（与 train.py 的 center_crop_resize 目标一致）。

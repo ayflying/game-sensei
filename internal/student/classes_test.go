@@ -38,15 +38,18 @@ func TestClasses与L1方向对齐(t *testing.T) {
 	}
 
 	// 非方向类：学生头独有的语义动作（L1 里对应 Tap/Press/None）。
-	for _, c := range []string{"tap", "press", "wait", "none"} {
+	// 4 个端到端语义类（2026-09-16）：tap_pk/tap_start/tap_pick 由档案
+	// student_semantics 落地坐标，back 落成系统返回键。
+	for _, c := range []string{"tap", "press", "wait", "none",
+		"tap_pk", "tap_start", "tap_pick", "back"} {
 		if !got[c] {
 			t.Fatalf("学生类别缺少 %q", c)
 		}
 	}
 
-	want := len(agent.AllDirs) + 4
+	want := len(agent.AllDirs) + 8
 	if len(student.Classes) != want {
-		t.Fatalf("学生类别数 %d，期望 %d（8 向 + tap/press/wait/none）",
+		t.Fatalf("学生类别数 %d，期望 %d（8 向 + tap/press/wait/none + 4 语义类）",
 			len(student.Classes), want)
 	}
 }
