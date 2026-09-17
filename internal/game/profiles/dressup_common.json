@@ -99,7 +99,7 @@
   "student_semantics": {
     "tap_pk": "pk_contest",
     "tap_start": "start",
-    "tap_pick": "pick_mid"
+    "tap_pick": "pick_left|pick_mid|pick_right"
   },
   "hints": [
     "【模板用法】换装类（房间枢纽型）骨架：复制为 profiles/<新游戏>.json 后按 docs/dressup-template.md 重标定（坐标/阈值为 YoYa Star 实测，直接用必然点错）；骨架不变量=入口守卫→清广告循环→选装幂等步→结算判定→末步 strict 无 when，五段结构跨换装稳定、只换参数不换结构。",

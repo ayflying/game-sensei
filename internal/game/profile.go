@@ -179,6 +179,24 @@ type Profile struct {
 	Plan *plan.Plan `json:"plan,omitempty"`
 }
 
+// SemanticSlots 返回语义类对应的按钮名槽位列表（student_semantics 值按 `|` 拆分）。
+//
+// 学生线「点击闭环」按槽位轮换点击：单槽位 = 固定按钮（旧行为）；多槽位 = 学生
+// 连续多击无进展时换下一槽（例：三选一选装卡 pick_left|pick_mid|pick_right，
+// 修「永远点中间一张」的漏点——首击被吞或该点的不在中卡时，轮换总会试到）。
+// 未配置该语义类时返回 nil（调用方按不可落地处理，不许猜）。
+func (p *Profile) SemanticSlots(cls string) []string {
+	raw, ok := p.StudentSemantics[cls]
+	if !ok {
+		return nil
+	}
+	parts := strings.Split(raw, "|")
+	for i, s := range parts {
+		parts[i] = strings.TrimSpace(s)
+	}
+	return parts
+}
+
 // BattleDetect 是「是否处于回合战斗态」的像素判据。
 //
 // 洛克王国实测（2026-09-12，平板 3200x2136）：战斗态底部横排五个奶油色圆钮
@@ -577,18 +595,25 @@ func (p *Profile) normalize() error {
 		}
 	}
 
-	// 学生语义映射：值必须指向已定义的**按钮**（classToAction 走 Button() 查坐标）。
-	// 拼错按钮名会让「学生输出该语义类」退化成 WAIT，装载期报错则立刻可见——
-	// 与按钮/宏校验同一原则：不许静默退化。
-	for cls, name := range p.StudentSemantics {
-		name = strings.ToLower(strings.TrimSpace(name))
-		p.StudentSemantics[cls] = name
-		if name == "" {
-			return fmt.Errorf("student_semantics[%q] 的按钮名为空", cls)
+	// 学生语义映射：值必须指向已定义的**按钮**（classToAction 走 SemanticSlots 查坐标）。
+	// 值支持 `|` 分隔多个按钮名（如 "pick_left|pick_mid|pick_right"）：学生线点击闭环
+	// 会按槽位轮换这些按钮——连续多击无进展视为「没点上」（页面刚加载吞首击、或
+	// 固定单卡坐标点不中该点的装扮），自动换下一张卡补点（见 cmd/helper student.go）。
+	// 单值 = 固定按钮（旧行为不变）。拼错按钮名会让「学生输出该语义类」退化成 WAIT，
+	// 装载期报错则立刻可见——与按钮/宏校验同一原则：不许静默退化。
+	for cls, raw := range p.StudentSemantics {
+		parts := strings.Split(raw, "|")
+		for i, name := range parts {
+			name = strings.ToLower(strings.TrimSpace(name))
+			if name == "" {
+				return fmt.Errorf("student_semantics[%q] 的按钮名为空", cls)
+			}
+			if _, ok := p.Button(name); !ok {
+				return fmt.Errorf("student_semantics[%q] 指向的 %q 不是已定义的按钮", cls, name)
+			}
+			parts[i] = name
 		}
-		if _, ok := p.Button(name); !ok {
-			return fmt.Errorf("student_semantics[%q] 指向的 %q 不是已定义的按钮", cls, name)
-		}
+		p.StudentSemantics[cls] = strings.Join(parts, "|")
 	}
 
 	// 战斗态判据：检测带必须是合法矩形；阈值给了就得为正。

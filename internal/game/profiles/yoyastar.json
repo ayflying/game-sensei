@@ -100,7 +100,7 @@
   "student_semantics": {
     "tap_pk": "pk_contest",
     "tap_start": "start",
-    "tap_pick": "pick_mid"
+    "tap_pick": "pick_left|pick_mid|pick_right"
   },
   "hints": [
     "本作为竖屏换装/直播/PK 评分游戏，无自由移动，全部操作是点击。",
