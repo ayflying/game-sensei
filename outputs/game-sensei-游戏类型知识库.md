@@ -775,3 +775,17 @@ region/color/tolerance），两边算出同一个数、得出同一个错误结�
 **恢复三步**：`keyevent 4` 退出系统页 → `monkey -p <包名> -c android.intent.category.LAUNCHER 1` 拉回游戏 → 等 10~15 s 再抓帧。
 
 > 判据：`dumpsys window | grep mCurrentFocus` 里出现**非游戏包名**，就按这条处理，**别怀疑脚本或游戏**。
+
+**五、探测「按住态」UI：后台长按 + 前台抓帧（adb 通用）**
+
+`adb shell input swipe x y x y <ms>` 是**阻塞**的（松手才返回），所以「手指还按在屏幕上」那一刻的界面永远抓不到 —— 极易把**按住才出现的 UI** 误判成**松手后的 UI**。解法是把长按丢到后台：
+
+```bash
+( adb -s <serial> shell input swipe 651 1007 651 1007 9000 >/dev/null 2>&1 & )
+sleep 4
+./shot -o hold.png          # 此刻手指仍按在屏幕上
+```
+
+本轮正是靠这一步证明：球按钮**按住第 4 秒时屏幕上只有球轮盘、没有瞄准框**。若省掉它，就会照抄攻略的「长按 → 瞄准框」，把错误结论写进档案。
+
+配套：Android 11+（SDK 30+）可用 `input motionevent DOWN/UP` 做**分段手势**（按住→停→拖→松手各一条命令）；**Android 10 及以下不支持**（`input motionevent` 直接打印 usage），只能靠上面这招近似。
