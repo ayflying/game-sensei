@@ -1,9 +1,34 @@
 # 教师在线示范与教学视频判读（原 §9.4 / §9.6）
 
-> 本文是 [game-sensei](../README.md) 的文档分册：收录原 §9.4 老师在线示范（`-demo`）、§9.6 教学视频抽帧与判读（`cmd/video`）。
+> 本文是 [game-sensei](../README.md) 的文档分册：收录 §9.3 独立图片理解，以及原 §9.4 老师在线示范（`-demo`）、§9.6 教学视频抽帧与判读（`cmd/video`）。
 > **章节编号沿用原 `README.md` 编号**，旧引用（如「README §11.16」）的对应关系见 [README §9 文档索引](../README.md#9-文档索引)。
 
 ---
+
+## 9.3 独立图片理解命令（cmd/vlm）
+
+日常图片判读使用正式 Go 命令，不再以 `.workbuddy/nrc/vlm.py` 作为默认入口；这条链路只用于图片识别，不改变 `helper -teacher/-demo` 的实时或教学逻辑。
+
+```bash
+# 原图读取、独立请求、仅输出文字；默认渠道模型优先，本地 Ollama 自动兜底
+go run ./cmd/vlm -in .workbuddy/tmp/screenshots/<任务ID>/frame.png -question "当前界面有哪些按钮？只报告可见文字和不确定项。"
+
+# 显式指定项目配置文件，裁剪坐标是原图像素，范围右下边界不包含
+go run ./cmd/vlm -env D:/git/game-sensei/.env -in frame.png -crop 0,0,120,120 -question "区域里是什么颜色？"
+
+# 仅用于诊断本地兜底服务
+go run ./cmd/vlm -in frame.png -question "描述可见内容" -backend ollama
+```
+
+- 配置读取项目根目录 `.env`，也可用 `-env` 明确指定；服务地址、模型、密钥不写死，不打印配置值或请求体。无真实密钥的配置模板才可提交，真实 `.env` 不进 Git。
+- `AIFERRY_BASE_URL` 支持 OpenAI 兼容基址或完整 `chat/completions` 地址；`AIFERRY_API_KEY` 为渠道密钥，`AIFERRY_MODELS` 为逗号分隔的优先级列表。
+- `OLLAMA_BASE_URL` 或 `OLLAMA_PORT` 指定本地服务，`OLLAMA_MODEL` 指定已安装视觉模型。不会自动下载模型、启动服务或悄悄改端口。
+- `VLM_TIMEOUT` 配置请求超时；`VLM_PROXY_URL` 可配置渠道直连网络失败后的代理地址。Ollama 走直连。
+- 默认 `-backend auto` 依次尝试渠道模型，全部失败后调用 Ollama；`aiferry` / `ollama` 可强制单后端诊断。HTTP 失败、无正文、输出截断都不算识别成功；只有思考字段也不冒充答案。
+- PNG/JPEG 先完整解码检查；不裁剪时保留原始字节，裁剪使用内存 PNG 无损编码，不生成临时派生图。每个请求只携带当前图片，不累积历史。
+- 主对话只接收文字、实际后端/模型及尝试状态；不输出图片编码、密钥或上游响应正文作为错误日志。
+- **命令不会擅自删除输入文件**（可能是训练样本或证据）；调用方按 AGENTS.md §0.5，在任务结束时删除本任务临时图片。两路失败返回错误，由调用方决定是否裁剪压缩后升级对话，不自动把图片塞入主对话。
+- 非空答案不代表语义正确，胜负、精确坐标等仍须依据原图证据与确定性判据核验。
 
 ## 9.4 Phase 2：老师在线示范（-demo）
 
