@@ -26,6 +26,9 @@ trainer/runs/
 replays/
 *.log
 .env
+.env.*
+!.env.example
+models/
 .venv/
 __pycache__/
 
