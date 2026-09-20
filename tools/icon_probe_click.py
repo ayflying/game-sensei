@@ -195,6 +195,41 @@ def extract_candidates(shot_path, out_dir, extra):
         return json.load(f)["icons"]
 
 
+def drop_known(shot, cands, min_score=0.85):
+    """剔除「已被库内模板覆盖」的候选 —— 让重复跑只探新图标（边际成本趋近 0）。
+
+    判据同 icon_intake：**匹配点落在候选 bbox 内**（±4px 容差）即算已入库。
+    不能按"中心距"判：模板匹配点与 extract 的 bbox 中心是两个口径，
+    大图标两者可差 18px，用中心距会把已入库的判成新的。
+    """
+    lib = icon_match.load_lib()
+    if not lib.get("templates"):
+        return cands, []
+    im = icon_match.imread(shot)
+    if im is None:
+        return cands, []
+    scales = [0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15]
+    hits = []
+    for name, meta in lib["templates"].items():
+        tmpl = icon_match.imread(os.path.join(icon_match.LIB_DIR, meta["file"]))
+        if tmpl is None:
+            continue
+        for h in icon_match.match_one(im, tmpl, scales, min_score):
+            h["name"] = name
+            hits.append(h)
+    keep, known = [], []
+    for c in cands:
+        x0, y0 = c["cx"] - c["w"] / 2, c["cy"] - c["h"] / 2
+        x1, y1 = c["cx"] + c["w"] / 2, c["cy"] + c["h"] / 2
+        hit = next((h for h in hits if x0 - 4 <= h["cx"] <= x1 + 4
+                    and y0 - 4 <= h["cy"] <= y1 + 4), None)
+        if hit:
+            known.append(f"{c['id']}→{hit['name']}")
+        else:
+            keep.append(c)
+    return keep, known
+
+
 def tap_twice_if_needed(x, y, base_png, tag, dead_thr, out_dir, verbose=True):
     """点一下→抓帧判定；没反应再点第二次（首点被吞极常见）。
 
@@ -308,6 +343,8 @@ def main():
     ap.add_argument("--apply", action="store_true",
                     help="把探测到的真图标自动建模板入库（重名跳过）")
     ap.add_argument("--apply-pad", type=int, default=2, help="--apply 建模板时的四向留边")
+    ap.add_argument("--no-skip-known", action="store_true",
+                    help="不跳过「已被库内模板覆盖」的候选（默认跳过：重复跑只探新图标，边际成本趋近 0）")
     a = ap.parse_args()
 
     if not a.shot and not a.fresh:
@@ -354,6 +391,11 @@ def main():
         ics = extract_candidates(base, out_dir, [])
         ics = [c for c in ics if c["area"] >= a.min_area]
         ics.sort(key=lambda c: -c["area"])
+        if not a.no_skip_known:
+            ics, known = drop_known(cur_base, ics)
+            if known:
+                print(f"  跳过已入库 {len(known)} 个：{'、'.join(known[:10])}"
+                      + ("…" if len(known) > 10 else ""))
         cands = ics[:a.top]
 
     if not cands:
@@ -371,7 +413,11 @@ def main():
     fails = 0
     drifts = 0
     for i, c in enumerate(cands):
-        tag = f"pr{i:03d}"
+        # 帧名用**候选 id**，不是"排序后序号"：
+        # icon_extract 的 id 分配顺序与 `sort(key=-area)` 未必一致，
+        # 用序号命名会让 prNNN_a.png 与实际候选错位（实测 pr003_a.png 里是 I002 的画面、
+        # I003 的画面在 pr004_a.png）⇒ 排查时被 shot 字段带偏。用 id 命名可直接对上。
+        tag = f"pr{c['id']}"
         t0 = time.time()
         print(f"\n[{i + 1}/{len(cands)}] {c['id']} ({c['cx']},{c['cy']})")
         d, png = tap_twice_if_needed(c["cx"], c["cy"], cur_base, tag,

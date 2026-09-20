@@ -158,6 +158,7 @@ def cmd_find(a):
         print(f"目标截图 {os.path.basename(a.shot)}  {shot.shape[1]}x{shot.shape[0]}   尺度 {scales}")
     total = 0
     best = None
+    rows = []          # 每模板命中，供 --at 多模板时逐行输出（一条命令巡检全库）
     for n in names:
         meta = lib["templates"].get(n)
         if not meta:
@@ -170,6 +171,7 @@ def cmd_find(a):
                 print(f"  模板图读取失败：{meta['file']}")
             continue
         hits = match_one(shot, tmpl, scales, a.min_score)
+        rows.append((n, hits))
         total += len(hits)
         for h in hits:
             h["name"] = n
@@ -181,13 +183,31 @@ def cmd_find(a):
                 print(f"   分数 {h['score']:.3f}  中心 ({h['cx']},{h['cy']})  "
                       f"{h['w']}x{h['h']}  尺度 {h['scale']}")
     if machine:
+        if a.tap:
+            # --tap 只点**全局最佳**一处：同时点多个模板没有意义（面板会被第一个点开）
+            if best is None:
+                print(f"MISS 阈值 {a.min_score}  {os.path.basename(a.shot)}")
+                return 1
+            print(f"{best['name']} {best['score']:.3f} {best['cx']} {best['cy']}")
+            tap_hit(best, a)
+            return 0
+        if len(names) > 1:
+            # 多模板巡检：**每个模板一行**（未命中回 MISS），rc=0 只要有一个命中。
+            # 单模板（--find X --at）保持原有单行语义不变，便于 shell 取值。
+            any_hit = False
+            for n, hits in rows:
+                if not hits:
+                    print(f"{n} MISS")
+                    continue
+                any_hit = True
+                for h in hits[:a.top]:
+                    print(f"{n} {h['score']:.3f} {h['cx']} {h['cy']} {h['w']}x{h['h']}")
+            return 0 if any_hit else 1
         if best is None:
             # 无命中回 MISS + 返回码 1，外层脚本据此走「先确认图标在屏」分支
             print(f"MISS 阈值 {a.min_score}  {os.path.basename(a.shot)}")
             return 1
         print(f"{best['name']} {best['score']:.3f} {best['cx']} {best['cy']}")
-        if a.tap:
-            tap_hit(best, a)
         return 0
     print(f"\n合计命中 {total} 处")
     return 0
@@ -200,6 +220,77 @@ def cmd_list(a):
         print(f"   {n:12s} {m['size'][0]}x{m['size'][1]}  来源 {m['from_shot']} "
               f"中心 {m['source_center']}  备注 {m.get('note') or '-'}")
     return 0
+
+
+def cmd_rename(a):
+    """改名：模板文件名 + library.json 键一起改，避免手工改 JSON 后文件名对不上。
+
+    用途：点击探针按 OCR 文本自动命名，个别字会误识（实测「眠枭庇护所」读成「眠底护所」）
+    ⇒ 人工核对后一条命令改正。库内顺序保持（重建 dict），不把条目挪到末尾。
+    """
+    lib = load_lib()
+    tmpl = lib["templates"]
+    if "=" not in a.rename:
+        print("--rename 需要「旧名=新名」格式，例如 --rename 眠底护所=眠枭庇护所")
+        return 1
+    old, new = (s.strip() for s in a.rename.split("=", 1))
+    if not old or not new:
+        print("--rename 需要「旧名=新名」格式")
+        return 1
+    if old not in tmpl:
+        print(f"库中没有「{old}」")
+        return 1
+    if new in tmpl and new != old:
+        print(f"「{new}」已存在，拒绝覆盖（如确要替换先 --drop {new}）")
+        return 1
+    meta = tmpl[old]
+    old_path = os.path.join(LIB_DIR, meta["file"])
+    ext = os.path.splitext(meta["file"])[1] or ".png"
+    new_file = new + ext
+    new_path = os.path.join(LIB_DIR, new_file)
+    if os.path.exists(old_path):
+        os.replace(old_path, new_path)
+    meta["file"] = new_file
+    meta["note"] = ((meta.get("note") or "")
+                    + f"；改名：「{old}」→「{new}」" + (f"（{a.note}）" if a.note else "")).lstrip("；")
+    lib["templates"] = {new if k == old else k: (meta if k == old else v)
+                        for k, v in tmpl.items()}
+    save_lib(lib)
+    print(f"已改名：「{old}」→「{new}」  模板文件 {new_file}")
+    return 0
+
+
+def cmd_drop(a):
+    """下架条目：模板文件移入 library/_dropped/（不真删，留可恢复），并从清单摘除。
+
+    用途：误建的重复/噪声条目。留 _dropped/ 是因为模板可复现性依赖来源帧，
+    而来源帧常是临时截图、会被清理 —— 移走比删除安全。
+    """
+    lib = load_lib()
+    tmpl = lib["templates"]
+    names = [n.strip() for n in a.drop.split(",") if n.strip()]
+    if not names:
+        print("--drop 需要模板名（多个用逗号分隔）")
+        return 1
+    gone, miss = [], []
+    trash = os.path.join(LIB_DIR, "_dropped")
+    for n in names:
+        if n not in tmpl:
+            miss.append(n)
+            continue
+        meta = tmpl.pop(n)
+        p = os.path.join(LIB_DIR, meta["file"])
+        if os.path.exists(p):
+            os.makedirs(trash, exist_ok=True)
+            os.replace(p, os.path.join(trash, meta["file"]))
+        gone.append(n)
+    if gone:
+        save_lib(lib)
+    print(f"已下架 {len(gone)} 条：{'、'.join(gone) or '-'}"
+          + (f"（模板文件移入 {os.path.relpath(trash, ROOT)}）" if gone else ""))
+    if miss:
+        print(f"库中没有：{'、'.join(miss)}")
+    return 0 if gone else 1
 
 
 def main():
@@ -225,10 +316,17 @@ def main():
     ap.add_argument("--tap-times", type=int, default=2, help="--tap 的点击次数（默认 2）")
     ap.add_argument("--tap-wait", type=int, default=1500, help="--tap 每次点击后等待毫秒")
     ap.add_argument("--list", action="store_true", help="列出图标库")
+    ap.add_argument("--rename", default="",
+                    help="改名：「旧名=新名」（模板文件名与清单键一起改，可配 --note 记原因）")
+    ap.add_argument("--drop", default="", help="下架条目：模板名，多个逗号分隔（文件移入 _dropped/）")
     a = ap.parse_args()
 
     if a.list:
         return cmd_list(a)
+    if a.rename:
+        return cmd_rename(a)
+    if a.drop:
+        return cmd_drop(a)
     if a.make:
         if not (a.from_shot and a.bbox):
             print("--make 需要 --from-shot 与 --bbox")
