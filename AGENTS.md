@@ -157,6 +157,7 @@
   | 界面文字识别（OCR） | `cmd/ocr` | `internal/ocr`（常驻子进程，`server.py` 内嵌） |
   | 画面 → 纯文本（亮度/色相/面板图、**颜色掩膜找色块与质心**） | `cmd/see` | `cmd/see/main.go` |
   | 真机截图 / 压缩 / 点位 / 帧差 Δ / A-B 对照 | `cmd/shot` | `internal/android` + `internal/vision` |
+  | **游戏经营循环**（「地下城里开商店」制作-收取 / 市场收单-挂单：全 OCR 当帧定位，零写死坐标、零钻石支出） | `cmd/forge`（`-rounds` 制作线、`-market` 卖货线） | `cmd/forge/main.go` |
   | 画面缩放与区域裁剪 | — | `internal/vision`（`Downscale` / `Zoom` / `ParseRect` / `Crop` / `FrameDiff`） |
   | 坐标标定 | `tools/grid_overlay.py` | — |
 
