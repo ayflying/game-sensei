@@ -78,6 +78,9 @@
    但Go 判读命令优先取原图。**不要先用图片读取工具“看一下再决定”**，那已经把图片放进主对话了。
 2. 已有可靠的颜色比例、局部帧差、模板或本地 OCR 能回答的问题，优先直接计算；复杂语义再交 VLM 判读。
    只通过屏幕视觉判断，不引入游戏内存、封包等非视觉信息。
+   **界面文字一律走 `cmd/ocr`（`internal/ocr`）**：常驻 PP-OCR 引擎，返回**原图坐标系**的文字与中心点，
+   支持 `-crop` / `-zoom` / `-find` / `-dir`；配置见根目录 `.env` 的 `OCR_*`，用法与三个实测坑见
+   `docs/teacher-demo-video.md` §9.7。**不要再为读文字写临时 python 脚本**。
 3. **图片识别统一走正式 Go 命令 `go run ./cmd/vlm -in <图片> -question "<问题>"`（可编译复用），配置统一在项目根目录 `.env`（已 gitignore，勿上传；不得在代码中硬编码密钥、渠道地址或模型）**。实现放 `internal/imagejudge`，不再使用 `.workbuddy/nrc/vlm.py` 临时入口。参数及配置见 `docs/teacher-demo-video.md` §9.3。
    默认后端为 **AiFerry 网关**（OpenAI 兼容 chat/completions；安酱 2026-09-18 指定，**仅用于图片识别，
    不用于其他任务**）：`.env` 里 `AIFERRY_BASE_URL` / `AIFERRY_API_KEY` / `AIFERRY_MODELS`
@@ -145,6 +148,23 @@
 ## 2. 硬约束（不可违反）
 
 - **常用能力必须正式化**：反复使用的图片理解、配置加载、渠道兜底及操作工具应落在正式 Go 包与 `cmd/` 命令，先查已有能力再补齐，不能长期靠 `.workbuddy` 临时脚本或临时代码执行。渠道地址、模型、密钥读取根目录 `.env`，不得写死。现有正式训练 Python 工具不因本条被无差别重写。
+
+  **动手前先查下表**；表里没有的、又要反复用的能力，当轮就把它做成正式包 + `cmd/`，别先写临时脚本再说：
+
+  | 要干的事 | 正式入口 | 实现 |
+  |---|---|---|
+  | 图片语义判读（VLM） | `cmd/vlm` | `internal/imagejudge` |
+  | 界面文字识别（OCR） | `cmd/ocr` | `internal/ocr`（常驻子进程，`server.py` 内嵌） |
+  | 画面 → 纯文本（亮度/色相/面板图、**颜色掩膜找色块与质心**） | `cmd/see` | `cmd/see/main.go` |
+  | 真机截图 / 压缩 / 点位 / 帧差 Δ / A-B 对照 | `cmd/shot` | `internal/android` + `internal/vision` |
+  | 画面缩放与区域裁剪 | — | `internal/vision`（`Downscale` / `Zoom` / `ParseRect` / `Crop` / `FrameDiff`） |
+  | 坐标标定 | `tools/grid_overlay.py` | — |
+
+  2026-09-20 的教训：一批「找绿按钮 / 画 ASCII 图 / 算帧差」的临时脚本其实
+  `see` 与 `shot -delta` 早就覆盖了，写之前没查这张表 —— **先查表，再动手**。
+
+  `.workbuddy/tmp/` 下的脚本只允许是**一次性的探测代码**，用完即删；凡是第二次要用的，
+  说明它该被正式化。
 
 - **零 CGO**：核心零 CGO（`CGO_ENABLED=0`）。不引 robotgo / onnxruntime_go 到核心；推理走 LazyDLL 挂 dll 或独立子进程。
 - **只视觉 + 模拟输入**：不读内存、不接封包、不做绕过反作弊。
@@ -225,6 +245,7 @@ git status
 - 项目日志：`.workbuddy/memory/YYYY-MM-DD.md`（**append-only**，当天已完成的**事实**）。
 - 长期项目约定：`.workbuddy/memory/MEMORY.md`（就地更新）。
 - 调试工具集 `cmd/`：`winlist`（列窗口）、`winshot`（置顶+截全屏）、`winclick`（置顶+点击）、`focusdbg`（前台 Win32 类名诊断）、`unlock-watch`（等解锁后置顶）、`overlay-test`。
+- 观测工具集 `cmd/`：`shot`（真机截图/压缩/点位/Δ）、`see`（画面转纯文本 + 颜色掩膜定位）、`vlm`（图片语义判读）、`ocr`（界面文字识别）。四个都编译进 `.workbuddy/bin/`，用之前先看 §2 的能力表。
 - 标定工具 `tools/`：`grid_overlay.py`（坐标读数）、`detect_state` / `runstats` / `watch` / `movetest`（洛王国真机跑批）。
 - CodeGraph：`C:/Users/ay/AppData/Local/codegraph/current/bin/codegraph.cmd`，重建索引 `codegraph init -i`；`.codegraph/` 已 gitignore。
 - 老师模型本地 Ollama 项目实例：端口 **11435**，模型库 `.ollama/models`，启动 `tools/serve_ollama.sh`。
