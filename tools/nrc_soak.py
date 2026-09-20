@@ -56,6 +56,9 @@ NAV_X, NAV_Y = 2127, 150
 PANEL_DIFF = 8.0
 # 「首点被吞」判据：点击后帧差低于此值 ⇒ 认为这一下没生效，补点一次
 SWALLOW_DIFF = 3.0
+# 「同一视口、同一界面」判据（用于"是否已回到地图"）：比 SWALLOW_DIFF 严得多，
+# 真回到同一张地图时实测帧差 0.0，而"地图+标记点"这类近似画面必须排除
+MAP_SAME_DIFF = 1.0
 # 单次点击后的等待（毫秒）：面板弹出实测 <1s，留 1.2s 余量
 TAP_WAIT = 1200
 # 地图界面的「固定 UI 锚点」：这两条同时命中 ⇒ 必在地图界面（免整帧 OCR 判态）
@@ -165,7 +168,11 @@ def detect_state(frame, hits=None, ref=None):
         return "map"
     if ref is not None:
         d = diff_two(ref, frame)
-        if d is not None and d < SWALLOW_DIFF:
+        # 阈值用 MAP_SAME_DIFF(1.0) 而不是 SWALLOW_DIFF(3.0)：这里要的是
+        # "**同一视口、同一界面**"（真回到地图时帧差实测 0.0）。放宽到 3.0 会把
+        # "地图 + 几个标记点"这类近似画面（如标记编辑态）也放进来 —— 那已经不是
+        # 干净的地图界面了。宁慢不错。
+        if d is not None and d < MAP_SAME_DIFF:
             return "map"
     txt = ocr_texts(frame)
     joined = " ".join(txt)
@@ -181,7 +188,7 @@ def detect_state(frame, hits=None, ref=None):
 
 
 def reset_to_map(rec, max_attempts=5, verbose=True, ref=None,
-                 initial=None, initial_state=None):
+                 initial=None, initial_state=None, tag_prefix=None):
     """OCR 驱动的状态机复位：把界面稳定拉回「地图界面」。
 
     ⚠️ 这是本轮踩出来的坑，别再盲点两次 ✕：
@@ -196,7 +203,16 @@ def reset_to_map(rec, max_attempts=5, verbose=True, ref=None,
         和复位第 1 步要抓的帧是同一画面，没必要再抓一次（省 1.9s）。
       ref —— 一张已确认是地图的参考帧（本轮 base）。复位末步"回到地图"时
         与它帧差 ≈0 ⇒ detect_state 走快路径，省一次整帧 OCR（3.6s）。
+
+    ⚠️ **tag_prefix 必须传"本轮专属"的前缀**（如 `soak03_reset`）。
+    帧名默认是 `reset_probeNN`，**不带轮次**⇒ 起点守卫与本轮复位会共用同一批
+    文件名，后者抓帧会**覆盖前者**。而起点守卫常把"它判为 map 的那一帧"当作
+    本轮的 base（ref）—— 一旦被覆盖，`detect_state(f, ref=base)` 就成了
+    **同一个文件自己跟自己比 ⇒ 帧差恒 0 ⇒ 永远判"已回到地图"**：
+    复位假成功、错误状态还被下一轮继承（自证式判据，2026-09-21 实测踩到）。
+    命名隔离是第一道防线，diff_two 的"同文件返回 None"是第二道。
     """
+    tag_prefix = tag_prefix or "reset"
     steps = []
     cur_f, cur_st = initial, initial_state
     f = None
@@ -206,7 +222,7 @@ def reset_to_map(rec, max_attempts=5, verbose=True, ref=None,
             st = cur_st if cur_st else detect_state(f, ref=ref)
             cur_f, cur_st = None, None            # 只在第一步复用一次
         else:
-            f = shot("reset_probe%02d" % i, rec)
+            f = shot("%s_probe%02d" % (tag_prefix, i), rec)
             st = detect_state(f, ref=ref)
         steps.append(st)
         if st == "map":
@@ -223,7 +239,19 @@ def reset_to_map(rec, max_attempts=5, verbose=True, ref=None,
 
 
 def diff_two(a, b):
-    """两帧灰度降采样后的平均绝对差（与 drv.py diff 同口径，这里自己算省一次进程）。"""
+    """两帧灰度降采样后的平均绝对差（与 drv.py diff 同口径，这里自己算省一次进程）。
+
+    ⚠️ 同一个文件返回 **None**（不是 0.0）。这是 2026-09-21 用血的教训换来的：
+    复位过程的抓帧曾与基准帧**同名**（都叫 reset_probeNN），于是"把复位帧与
+    基准帧比帧差"实际是**自己跟自己比 ⇒ 恒 0** ⇒ 帧差快路径永远判"已回到地图"，
+    复位假的成功、错误状态还被下一轮当基准继续沿用（自证式判据）。
+    返回 None 让调用方走真判据（OCR），宁慢不错。
+    """
+    try:
+        if os.path.abspath(a) == os.path.abspath(b):
+            return None
+    except Exception:
+        pass
     try:
         from PIL import Image
         import numpy as np
@@ -315,8 +343,12 @@ def main():
             base = shot("soak%02d_base" % i, r)
             st0 = detect_state(base, ref=prev_map)
             r["start_state"] = st0
+            # 原始起点态单独记：下面复位成功后会覆盖 start_state，
+            # 不单独留一份就看不出"这一轮是被守卫救回来的"。
+            r["start_state_raw"] = st0
             if st0 != "map":
-                ok0, base, path0 = reset_to_map(r, verbose=a.verbose)
+                ok0, base, path0 = reset_to_map(r, verbose=a.verbose,
+                                                tag_prefix="soak%02d_start" % i)
                 r["start_reset_path"] = path0
                 st0 = detect_state(base)
                 r["start_state"] = st0
@@ -403,7 +435,8 @@ def main():
             t0 = time.time()
             rst_ok, rst, path = reset_to_map(
                 r, verbose=a.verbose, ref=base, initial=after,
-                initial_state=("panel" if r.get("kind") == "panel" else None))
+                initial_state=("panel" if r.get("kind") == "panel" else None),
+                tag_prefix="soak%02d_reset" % i)
             r["reset_sec"] = round(time.time() - t0, 2)
             d2 = diff_two(base, rst)
             r["reset_diff"] = None if d2 is None else round(d2, 2)
