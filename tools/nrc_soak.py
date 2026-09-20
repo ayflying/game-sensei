@@ -46,8 +46,30 @@ ADB = os.environ.get("NRC_ADB",
                      r"C:/Users/ay/AppData/Local/Android/Sdk/platform-tools/adb.exe")
 SERIAL = os.environ.get("NRC_SERIAL", "ecbff3a5")
 
-# 本轮唯一被点击的图标（固定 UI、退出路径已实测无损）
-TAP_TARGET = "眠枭庇护所(地图UI)"
+# 跑批点击目标：全部是**固定 UI**（钉死坐标、不随视口移动），退出路径已逐个实测。
+# 依据 docs/nrc-icon-atlas-method.md §5.9 的「多图标反应/退出对照」：
+#
+#   目标                   点击反应          实测帧差   退出方式
+#   眠枭庇护所(地图UI)      区域进度面板       18.4      ✕ ×1
+#   皇家招待所             标记编辑态         21.8      ✕ ×1
+#   家园                  家园信息浮层       46.4      ✕ ×1
+#   皮卡月刊              只有名字标签        2.04      再点同位置一次
+#
+#   exit   "close" = 点右上 ✕ 一次退出；"retap" = 再点同位置一次退出
+#          ⚠️ 皮卡月刊必须用 retap —— 它是 toggle 名字标签（不是按钮），
+#          在标签态点 ✕ 会把地图一起关掉、落回大世界（实测）。
+#   min_diff 判"确实有反应"的帧差门槛：面板类 8.0；标签类特征就是小（实测 2.04），
+#          若沿用 8.0 会被误判成"点了没反应"。
+#   verify   点击后是否做"首点被吞就补点一次"（默认 True）。**标签类必须 False** ——
+#          它的反应只有 2.04，补点门槛一过就把标签收回去，最终帧差 0.00、判成"无反应"。
+TARGETS = [
+    {"name": "眠枭庇护所(地图UI)", "exit": "close", "min_diff": 8.0, "expect": "区域进度面板"},
+    {"name": "皇家招待所", "exit": "close", "min_diff": 8.0, "expect": "标记编辑态"},
+    {"name": "家园", "exit": "close", "min_diff": 8.0, "expect": "家园信息浮层"},
+    {"name": "皮卡月刊", "exit": "retap", "min_diff": 1.5, "verify": False,
+     "expect": "名字标签"},
+]
+TAP_TARGET = TARGETS[0]["name"]        # 兼容：单目标模式下默认点第一个
 # 地图界面右上角 ✕（点一次即退出面板/标记态；连点两次会连地图一起关掉、落回大世界）
 CLOSE_X, CLOSE_Y = 2169, 49
 # 大世界里开地图的右上导航圆钮（单点即可，被吞再点）
@@ -290,7 +312,8 @@ def tap_px(x, y, wait_ms=1200):
     return True
 
 
-def tap_once_verified(x, y, base, tag, rec, wait_ms=TAP_WAIT):
+def tap_once_verified(x, y, base, tag, rec, wait_ms=TAP_WAIT,
+                      min_diff=SWALLOW_DIFF, verify=True):
     """点一次 → 抓帧；只有「几乎没变化」才补点一次 → 再抓帧。
 
     返回 (帧路径, 帧差, 点击次数)。帧差以 `base` 为参照。
@@ -299,12 +322,19 @@ def tap_once_verified(x, y, base, tag, rec, wait_ms=TAP_WAIT):
     ⇒ 与 base 逐像素一致（帧差 0.00），会被判成"点击无效"；若首点恰好被吞
     ⇒ 吞+开 ⇒ 面板开着（帧差 ~18），同一份代码给出两种截然相反的结果。
     自适应补点后，两种情况都收敛到"面板开着"。
+
+    ⚠️ 补点门槛 min_diff 必须按**目标类型**给（2026-09-21 多图标跑批实测踩到）：
+    「皮卡月刊」是 toggle **名字标签**，反应本身只有 2.04 —— 沿用面板类的
+    3.0 门槛，会把"确实弹了标签"误判成"首点被吞"，于是补点一次正好把标签
+    收回，帧差回到 0.00，最终判成"点了没反应"。**同一个 toggle 陷阱换个马甲
+    又踩一次**：门槛必须与被判对象的量级匹配；量级天然很小的反应直接关掉补点
+    （verify=False），别指望靠调门槛擦边。
     """
     tap_px(x, y, wait_ms)
     times = 1
     f = shot(tag + "_a", rec)
     d = diff_two(base, f)
-    if d is not None and d < SWALLOW_DIFF:
+    if verify and d is not None and d < min_diff:
         tap_px(x, y, wait_ms)
         times = 2
         f = shot(tag + "_b", rec)
@@ -321,23 +351,49 @@ def main():
     ap.add_argument("--pre-check", action="store_true",
                     help="点击前额外抓一帧复核状态（更保险，但每轮多花 1.9s；实测漂移恒为 0）")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--targets", default="",
+                    help="点击目标（逗号分隔的图标名）；默认全部轮换。"
+                         "传单个名即退化为单目标模式。可选："
+                         + " / ".join(t["name"] for t in TARGETS))
     a = ap.parse_args()
+
+    # 选目标：默认全部轮换（每轮一个，按序循环）
+    if a.targets.strip():
+        want = [s.strip() for s in a.targets.split(",") if s.strip()]
+        unknown = [w for w in want if w not in {t["name"] for t in TARGETS}]
+        if unknown:
+            print("未知目标：%s（可选：%s）"
+                  % (", ".join(unknown), " / ".join(t["name"] for t in TARGETS)))
+            return 2
+        targets = [t for t in TARGETS if t["name"] in want]
+    else:
+        targets = list(TARGETS)
+    multi = len(targets) > 1
 
     out_dir = os.path.join(ROOT, a.out)
     os.makedirs(out_dir, exist_ok=True)
 
     rec = {"rounds": [], "started": time.strftime("%Y-%m-%d %H:%M:%S"),
-           "target": TAP_TARGET, "dry_run": a.dry_run, "min_score": a.min_score}
+           "dry_run": a.dry_run, "min_score": a.min_score,
+           "targets": [t["name"] for t in targets]}
+    # 兼容旧字段：单目标时仍写 target，便于既有报告脚本读取
+    if not multi:
+        rec["target"] = targets[0]["name"]
 
     print("=" * 68)
-    print("洛克王国:世界 真机巡检  轮数=%d  点击目标=%s%s"
-          % (a.rounds, TAP_TARGET, "  [DRY-RUN]" if a.dry_run else ""))
+    print("洛克王国:世界 真机巡检  轮数=%d%s"
+          % (a.rounds, "  [DRY-RUN]" if a.dry_run else ""))
+    print("点击目标：%s" % ("轮换 " + " → ".join(t["name"] for t in targets) if multi
+                            else targets[0]["name"]))
     print("=" * 68)
 
     prev_map = None            # 上一轮复位后的地图帧：给本轮起点守卫当 ref（省一次 OCR）
     for i in range(1, a.rounds + 1):
         r = {"round": i, "t0": time.strftime("%H:%M:%S")}
         t_round = time.time()
+        tgt = targets[(i - 1) % len(targets)]      # 轮换：每轮点一个目标
+        tname = tgt["name"]
+        r["target"] = tname
         try:
             # ---- 0) 起点守卫：不在地图界面就先复位，别让上一轮的残留状态污染本轮统计 ----
             base = shot("soak%02d_base" % i, r)
@@ -371,7 +427,7 @@ def main():
                 for k, v in sorted(hits.items()):
                     print("      %-22s %.3f @(%d,%d)" % (k, v[0], v[1], v[2]))
 
-            ok_locate = TAP_TARGET in hits
+            ok_locate = tname in hits
             r["target_found"] = ok_locate
 
             if a.dry_run:
@@ -390,7 +446,7 @@ def main():
                 rec["rounds"].append(r)
                 continue
 
-            score, tx, ty = hits[TAP_TARGET]
+            score, tx, ty = hits[tname]
             r["tap_at"] = [tx, ty]
             r["tap_score"] = round(score, 3)
 
@@ -410,10 +466,16 @@ def main():
 
             # ---- 3) 点击（坐标来自本轮模板匹配；点一次即验，没变化才补点）----
             t0 = time.time()
-            after, d, times = tap_once_verified(tx, ty, base, "soak%02d_after" % i, r)
+            after, d, times = tap_once_verified(
+                tx, ty, base, "soak%02d_after" % i, r,
+                # 补点门槛取「本目标的反应量级」与面板类默认值中的较小者：
+                # panel 类 min(8.0,3.0)=3.0（面板反应 17~46，不会误补）；
+                # label 类 min(1.5,3.0)=1.5，且 verify=False 根本不补点。
+                min_diff=min(tgt.get("min_diff", SWALLOW_DIFF), SWALLOW_DIFF),
+                verify=tgt.get("verify", True))
             r["tap_sec"] = round(time.time() - t0, 2)
             r["tap_times"] = times
-            r["tap_out"] = "%s %.3f %d %d" % (TAP_TARGET, score, tx, ty)
+            r["tap_out"] = "%s %.3f %d %d" % (tname, score, tx, ty)
 
             # ---- 4) 判定反应（帧差 + OCR 新增文字）----
             r["after"] = os.path.basename(after)
@@ -422,21 +484,36 @@ def main():
             after_lines = ocr_lines(after)
             new_txt = [t for x, y, t in after_lines if (x, y, t) not in before_txt]
             r["new_texts"] = new_txt[:8]
-            if d is not None and d >= PANEL_DIFF and new_txt:
-                r["kind"] = "panel"
-            elif d is not None and d >= PANEL_DIFF:
+            # 门槛按目标类型取：面板类 8.0、标签类 1.5（皮卡月刊实测帧差仅 2.04，
+            # 沿用 8.0 会把"确实弹了名字标签"误判成"点了没反应"）
+            thresh = tgt.get("min_diff", PANEL_DIFF)
+            r["min_diff"] = thresh
+            if d is not None and d >= thresh and new_txt:
+                r["kind"] = "panel" if thresh >= PANEL_DIFF else "label"
+            elif d is not None and d >= thresh:
                 r["kind"] = "changed_no_text"
             else:
                 r["kind"] = "none"
-            r["verdict"] = "TAP_OK" if r["kind"] == "panel" else "TAP_WEAK"
+            r["verdict"] = "TAP_OK" if r["kind"] in ("panel", "label") else "TAP_WEAK"
 
             # ---- 5) 复位：OCR 状态机拉回地图界面 ----
-            # 复用 after 帧当复位第 1 步（同一画面，省一次抓帧）；ref=base 让"回到 map"免 OCR。
             t0 = time.time()
-            rst_ok, rst, path = reset_to_map(
-                r, verbose=a.verbose, ref=base, initial=after,
-                initial_state=("panel" if r.get("kind") == "panel" else None),
-                tag_prefix="soak%02d_reset" % i)
+            exit_kind = tgt.get("exit", "close")
+            r["exit_kind"] = exit_kind
+            if exit_kind == "retap":
+                # toggle 名字标签（皮卡月刊）：再点一次同位置即收。
+                # ⚠️ 不能走 ✕ —— 标签态点 ✕ 会把地图一起关掉、落回大世界（实测）。
+                # 不复用 after 帧：它的状态是"标签态"，状态机认不出来，自己抓帧更稳。
+                tap_px(tx, ty, 900)
+                rst_ok, rst, path = reset_to_map(
+                    r, verbose=a.verbose, ref=base,
+                    tag_prefix="soak%02d_reset" % i)
+            else:
+                # 复用 after 帧当复位第 1 步（同一画面，省一次抓帧）；ref=base 让"回到 map"免 OCR。
+                rst_ok, rst, path = reset_to_map(
+                    r, verbose=a.verbose, ref=base, initial=after,
+                    initial_state=("panel" if r.get("kind") == "panel" else None),
+                    tag_prefix="soak%02d_reset" % i)
             r["reset_sec"] = round(time.time() - t0, 2)
             d2 = diff_two(base, rst)
             r["reset_diff"] = None if d2 is None else round(d2, 2)
@@ -445,9 +522,8 @@ def main():
             if rst_ok:
                 prev_map = rst          # 给下一轮起点守卫当 ref
 
-            print("  轮 %2d  定位%2d条/%.1fs  点(%d,%d)%.3f×%d  点击前态=%s(帧差%s)  点击后帧差%.2f 新增%d条 → %s  复位%s(%s)  本轮%.1fs"
-                  % (i, r["locate_hits"], loc_dt, tx, ty, score, times,
-                     r["pre_state"], r["pre_diff"],
+            print("  轮 %2d %-18s 定位%2d条/%.1fs  点(%d,%d)%.3f×%d  帧差%.2f 新增%d条 → %-6s  复位%s(%s)  本轮%.1fs"
+                  % (i, tname, r["locate_hits"], loc_dt, tx, ty, score, times,
                      d if d is not None else -1, len(new_txt), r["kind"],
                      "OK" if rst_ok else "失败", "/".join(path),
                      time.time() - t_round))
@@ -506,6 +582,26 @@ def main():
         if v:
             rec["summary"][key + "_avg"] = round(statistics.mean(v), 1)
 
+    # 分目标统计 —— 多图标模式的关键输出：哪个目标稳、哪个不稳（单图标模式也可看）
+    per = {}
+    for t in targets:
+        sub = [r for r in rs if r.get("target") == t["name"]]
+        if not sub:
+            continue
+        dec = [r for r in sub if r.get("verdict") in ("TAP_OK", "TAP_WEAK", "TAP_FAIL")]
+        oks = [r for r in dec if r.get("verdict") == "TAP_OK"]
+        diffs = [r["diff"] for r in sub if isinstance(r.get("diff"), (int, float))]
+        per[t["name"]] = {
+            "rounds": len(sub),
+            "decided": len(dec),
+            "tap_ok": len(oks),
+            "reset_ok": len([r for r in sub if r.get("reset_ok") is True]),
+            "diff_avg": round(statistics.mean(diffs), 2) if diffs else None,
+            "expect": t.get("expect"),
+        }
+    if per:
+        rec["summary"]["per_target"] = per
+
     with open(os.path.join(out_dir, "soak.json"), "w", encoding="utf-8") as f:
         json.dump(rec, f, ensure_ascii=False, indent=2)
 
@@ -518,6 +614,14 @@ def main():
     if s["success_rate"] is not None:
         print("  链路成功率      : %.1f%%" % (s["success_rate"] * 100))
     print("  复位成功        : %d/%d" % (s["reset_ok"], s["rounds_total"]))
+    if s.get("per_target"):
+        print("  ── 分目标 ──")
+        for name, v in s["per_target"].items():
+            print("    %-20s %d轮  成功 %d/%d  复位 %d/%d  平均帧差 %s  （预期：%s）"
+                  % (name, v["rounds"], v["tap_ok"], v["decided"],
+                     v["reset_ok"], v["rounds"],
+                     v["diff_avg"] if v["diff_avg"] is not None else "-",
+                     v.get("expect") or "-"))
     print("  全库定位命中均值 : %s 条/轮" % s["locate_hits_avg"])
     print("  平均抓帧        : %s ms（最慢 %s）" % (s.get("shot_ms_avg"), s.get("shot_ms_max")))
     print("  平均全库定位    : %s ms（最慢 %s）" % (s.get("locate_ms_avg"), s.get("locate_ms_max")))
