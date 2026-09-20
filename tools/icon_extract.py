@@ -10,15 +10,20 @@
 就卡在这里。
 
 本工具只解决「图标**在哪**」（像素算法，坐标可靠）；
-「图标**是什么**」交给 `tools/icon_annotate.py` 调本地 VLM 命名。
-两者结合 = VLM 的语义 + 像素的精度，互补各自短板。
+「图标**是什么**」由**人工看网格图确认一次**（`--grid` 输出），
+再由 `tools/icon_match.py` 记成模板复用——实测 9B 本地 VLM 无法可靠命名小图标
+（见 `tools/icon_annotate.py` 注释），所以命名环节保留人工。
 
 ## 判据设计
 
-分三路颜色系提取（图标通常至少命中一路）：
+分四路提取（图标通常至少命中一路）：
   - `saturated` 高饱和：彩色图标（蓝盾锚点、红色任务点、金色宝箱）
   - `bright`    高亮近白：图标常见的白色描边/高光
   - `dark`      深色：图标的深色底或描边
+  - `texture`   局部对比度：**专治"贴在同色大色块上的图标"**——图标与周围地图底色
+    同属一个颜色连通域时，前三路会把两者连成一片、整块因面积/尺寸超限被丢弃
+    （实测「星光对决」79x76 蓝色徽章贴在同色地图上，颜色路 2/2 帧全漏；
+    改为局部对比度后切出 72x72，逼近真值）。可用 `--no-texture` 关闭。
 
 用**形状过滤**剔除文字与地形：
   - 面积、bbox 尺寸范围
@@ -39,18 +44,35 @@ import os
 from collections import deque
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 
-def build_masks(im):
-    """三路颜色系 mask。im 必须是 PIL RGB Image（int16 ndarray 无法回灌 PIL）。"""
+def build_masks(im, tex_win=15, tex_k=1.5, tex_min=18):
+    """四路 mask。im 必须是 PIL RGB Image（int16 ndarray 无法回灌 PIL）。
+
+    前三路按**颜色系**切分（高饱和 / 高亮 / 深色），
+    第四路 texture 按**局部对比度**切分——这条专治"贴在同色大色块上的图标"：
+    图标与周围地图底色同属一个颜色连通域时，前三路会把两者连成一片，
+    整块因面积/尺寸超限被丢弃（实测「星光对决」79x76 的蓝色徽章贴在同色地图上，
+    颜色路 2/2 帧全漏）；而图标内部必然有纹理，周围底色平滑，
+    局部对比度能把它干净地切出来（实测切出 72x72，逼近真值）。
+    """
     hsv = np.array(im.convert("HSV")).astype(np.int16)
     S, V = hsv[:, :, 1], hsv[:, :, 2]
-    return {
+    # 局部对比度：灰度与原图 BoxBlur 之差（PIL BoxBlur(r) 窗 = (2r+1)^2）
+    r = max(1, (tex_win - 1) // 2)
+    gl = im.convert("L")
+    ga = np.array(gl).astype(np.int16)
+    blur = np.array(gl.filter(ImageFilter.BoxBlur(r))).astype(np.int16)
+    contrast = np.abs(ga - blur)
+    thr = max(tex_min, float(np.percentile(contrast, 90)) * tex_k)
+    masks = {
         "saturated": (S > 120) & (V > 110),
         "bright": (V > 205) & (S < 70),
         "dark": (V < 75),
-    }, (hsv[:, :, 0], S, V)
+        "texture": contrast > thr,
+    }
+    return masks, (hsv[:, :, 0], S, V), round(thr, 1)
 
 
 def downsample_any(mask, scale):
@@ -95,6 +117,24 @@ def components(mask_small):
                         q.append((ny, nx))
             out.append((n, minx, miny, maxx, maxy))
     return out
+
+
+def refine_bbox(mask, x0, y0, x1, y1, lo=5.0, hi=95.0):
+    """把 bbox 收缩到「命中像素的密集主体」——专给 texture 路用。
+
+    texture mask 只标出"哪里不平坦"，图标外围的零散纹理点会把 bbox 撑大
+    （实测眠枭 64x58 vs 真值 41x27），而颜色路的 bbox 天然更紧。
+    按命中像素的 x/y 分位收缩，可把零散外围点剔掉；对实心块（如星光对决）
+    则几乎不收缩，因此对两类图标都安全。
+    """
+    sub = mask[y0:y1 + 1, x0:x1 + 1]
+    ys, xs = np.nonzero(sub)
+    if len(xs) < 20:
+        return x0, y0, x1, y1
+    xa, xb = np.percentile(xs, [lo, hi])
+    ya, yb = np.percentile(ys, [lo, hi])
+    return (x0 + int(xa), y0 + int(ya),
+            x0 + int(np.ceil(xb)), y0 + int(np.ceil(yb)))
 
 
 def dominant_hue(hsv, x0, y0, x1, y1, mask):
@@ -167,6 +207,11 @@ def main():
     ap.add_argument("--max-px", type=int, default=8000, help="原图像素面积上限")
     ap.add_argument("--ar", default="0.35,2.8", help="bbox 宽高比范围 lo,hi")
     ap.add_argument("--fill", type=float, default=0.35, help="bbox 填充率下限")
+    ap.add_argument("--no-texture", action="store_true", help="禁用局部对比度路（只跑三路颜色）")
+    ap.add_argument("--tex-win", type=int, default=15, help="局部对比度窗口（奇数；越大越只保留大结构）")
+    ap.add_argument("--tex-k", type=float, default=1.5, help="阈值系数 thr = max(--tex-min, p90(对比度)×k)")
+    ap.add_argument("--tex-min", type=int, default=18, help="对比度阈值下限（防低对比画面过噪）")
+    ap.add_argument("--tex-fill", type=float, default=0.20, help="texture 路 bbox 填充率下限（纹理像素天然稀疏）")
     ap.add_argument("--edge-min", type=float, default=0.10, help="bbox 内边缘密度下限（区分图标与地形）")
     ap.add_argument("--max-side", type=int, default=140, help="bbox 最长边上限（原图px）")
     ap.add_argument("--zoom", type=int, default=3, help="导出裁剪图的放大倍数")
@@ -178,8 +223,15 @@ def main():
     os.makedirs(a.out, exist_ok=True)
 
     im = Image.open(a.png).convert("RGB")
-    masks, hsv = build_masks(im)
+    if a.no_texture:
+        masks, hsv, tex_thr = build_masks(im)
+        masks.pop("texture", None)
+        tex_thr = None
+    else:
+        masks, hsv, tex_thr = build_masks(im, a.tex_win, a.tex_k, a.tex_min)
     H, S, V = hsv
+    # texture 路的"色相"要用宽松彩色 mask 算（对比度 mask 里的像素色相无意义）
+    loose = (S > 60) & (V > 60)
 
     # 边缘密度图：图标有清晰描边/图案，地形渐变平缓——这条能把两者分开
     gray = np.array(im.convert("L")).astype(np.int16)
@@ -187,7 +239,8 @@ def main():
     gy = np.abs(np.diff(gray, axis=0, prepend=gray[:1, :]))
     edge = (gx + gy) > 40
 
-    print(f"图 {im.width}x{im.height}  scale={a.scale}")
+    print(f"图 {im.width}x{im.height}  scale={a.scale}"
+          + (f"  texture 阈值 {tex_thr}（p90×{a.tex_k}）" if tex_thr is not None else "  已禁用 texture 路"))
 
     candidates = []
     for group, mask in masks.items():
@@ -213,12 +266,27 @@ def main():
             if area < a.min_px or area > a.max_px:
                 continue
             fill = area / float(bw * bh)
-            if fill < a.fill:
+            # texture 路的像素天然稀疏（只有纹理/描边命中），fill 门槛另设
+            fill_min = a.tex_fill if group == "texture" else a.fill
+            if fill < fill_min:
                 continue
             edn = float(edge[y0:y1 + 1, x0:x1 + 1].mean())
             if edn < a.edge_min:
                 continue
-            h = dominant_hue(hsv, x0, y0, x1, y1, mask)
+            # texture 路 bbox 偏松 ⇒ 收缩到命中主体（见 refine_bbox 注释），并重算面积/填充率。
+            # 收缩过度（面积掉到 min-px 以下）时回退原 bbox，避免把候选切碎。
+            if group == "texture":
+                rx0, ry0, rx1, ry1 = refine_bbox(mask, x0, y0, x1, y1)
+                if rx1 - rx0 >= 8 and ry1 - ry0 >= 8:
+                    rarea = int(mask[ry0:ry1 + 1, rx0:rx1 + 1].sum())
+                    if rarea >= a.min_px:
+                        x0, y0, x1, y1 = rx0, ry0, rx1, ry1
+                        bw, bh = x1 - x0 + 1, y1 - y0 + 1
+                        area, fill = rarea, rarea / float(bw * bh)
+                        edn = float(edge[y0:y1 + 1, x0:x1 + 1].mean())
+            # texture 路的 mask 只表达"哪里不平坦"，算色相要用宽松彩色 mask
+            h = dominant_hue(hsv, x0, y0, x1, y1,
+                             loose if group == "texture" else mask)
             candidates.append({
                 "group": group,
                 "x0": int(x0), "y0": int(y0), "x1": int(x1), "y1": int(y1),
@@ -230,8 +298,11 @@ def main():
             kept += 1
         print(f"  [{group}] 连通域 {len(comps)} → 通过形状过滤 {kept}")
 
-    # 跨路/同路去重：中心距 < 0.6*较小边长 视为同一图标，保住面积大的
-    candidates.sort(key=lambda c: -c["area"])
+    # 跨路/同路去重：中心距 < 0.6*较小边长 视为同一图标。
+    # 排序 = 先「颜色路」后「texture 路」，组内按面积降序。
+    # 颜色路 bbox 实测更紧（眠枭 52x28 vs texture 51x51、家园 16x14 vs texture 131x117），
+    # 若只按面积排，texture 的松 bbox 会把颜色路的精确 bbox 挤掉（实测 q2/tapD 复现）。
+    candidates.sort(key=lambda c: (c["group"] == "texture", -c["area"]))
     final = []
     for c in candidates:
         dup = False
