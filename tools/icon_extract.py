@@ -39,7 +39,7 @@ import os
 from collections import deque
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 def build_masks(im):
@@ -128,6 +128,36 @@ def hue_name(h):
     return "品红"
 
 
+def make_grid(im, icons, out_path, cols=10, cell=96, pad=8):
+    """把候选拼成网格图（每格标 id + 中心坐标），供**人工一次确认**。
+
+    这是图标档案流程的第 ② 步关键组件：实测证明 VLM 无法可靠分类小图标
+    （见 tools/icon_annotate.py 注释），因此命名必须由人看一眼完成——
+    那么就要有"一眼看完全部候选"的视图。
+    """
+    n = len(icons)
+    rows = (n + cols - 1) // cols
+    label_h = 20
+    W = cols * (cell + pad) + pad
+    H = rows * (cell + label_h + pad) + pad
+    canvas = Image.new("RGB", (W, H), (26, 26, 30))
+    d = ImageDraw.Draw(canvas)
+    for i, c in enumerate(icons):
+        r, col = divmod(i, cols)
+        x = pad + col * (cell + pad)
+        y = pad + r * (cell + label_h + pad)
+        box = (max(0, c["x0"] - 4), max(0, c["y0"] - 4),
+               min(im.width, c["x1"] + 5), min(im.height, c["y1"] + 5))
+        crop = im.crop(box)
+        k = min(cell / crop.width, cell / crop.height)
+        crop = crop.resize((max(1, int(crop.width * k)), max(1, int(crop.height * k))),
+                           Image.LANCZOS)
+        canvas.paste(crop, (x + (cell - crop.width) // 2, y + (cell - crop.height) // 2))
+        d.text((x + 2, y + cell + 3), f"{c['id']} {c['cx']},{c['cy']}", fill=(225, 225, 225))
+    canvas.save(out_path)
+    return out_path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("png")
@@ -140,6 +170,8 @@ def main():
     ap.add_argument("--edge-min", type=float, default=0.10, help="bbox 内边缘密度下限（区分图标与地形）")
     ap.add_argument("--max-side", type=int, default=140, help="bbox 最长边上限（原图px）")
     ap.add_argument("--zoom", type=int, default=3, help="导出裁剪图的放大倍数")
+    ap.add_argument("--grid", default="", help="额外输出候选网格拼图路径（供人工一次确认）")
+    ap.add_argument("--grid-top", type=int, default=60, help="网格图最多放几个候选")
     a = ap.parse_args()
 
     ar_lo, ar_hi = (float(v) for v in a.ar.split(","))
@@ -242,6 +274,10 @@ def main():
     for c in final[:20]:
         print(f"   {c['id']} ({c['cx']:4d},{c['cy']:4d}) {c['w']:3d}x{c['h']:3d} "
               f"{c['color']:>2s} fill={c['fill']:.2f} area={c['area']}")
+
+    if a.grid:
+        gp = make_grid(im, final[:a.grid_top], a.grid)
+        print(f"\n候选网格图（人工确认用）→ {gp}")
 
 
 if __name__ == "__main__":
