@@ -413,11 +413,13 @@ def main():
     fails = 0
     drifts = 0
     for i, c in enumerate(cands):
-        # 帧名用**候选 id**，不是"排序后序号"：
-        # icon_extract 的 id 分配顺序与 `sort(key=-area)` 未必一致，
-        # 用序号命名会让 prNNN_a.png 与实际候选错位（实测 pr003_a.png 里是 I002 的画面、
-        # I003 的画面在 pr004_a.png）⇒ 排查时被 shot 字段带偏。用 id 命名可直接对上。
-        tag = f"pr{c['id']}"
+        # 帧名 = **批次目录名 + 候选 id**：
+        # ① 用 id 而不是"排序后序号"——icon_extract 的 id 分配顺序与 `sort(key=-area)`
+        #    未必一致，用序号命名会让 prNNN_a.png 与实际候选错位
+        #    （实测 pr003_a.png 里是 I002 的画面、I003 的画面在 pr004_a.png）。
+        # ② 再带批次前缀——候选 id 每批都从 I000 重新编号，光用 id 会让**后一批覆盖前一批**的帧
+        #    （实测 run6 的 prI015_a.png 盖掉了 run5 同名文件，证据被换掉且不自知）。
+        tag = f"{os.path.basename(os.path.normpath(out_dir))}_{c['id']}"
         t0 = time.time()
         print(f"\n[{i + 1}/{len(cands)}] {c['id']} ({c['cx']},{c['cy']})")
         d, png = tap_twice_if_needed(c["cx"], c["cy"], cur_base, tag,
