@@ -13,7 +13,7 @@
     # 2) 在目标截图上搜同名模板
     python tools/icon_match.py --find 眠枭庇护所 --shot v11.png
     # 3) 一次搜全部模板
-    python tools/icon_match.py --find-all --shot v11.png --min-score 0.72
+    python tools/icon_match.py --find-all --shot v11.png --min-score 0.85
 
 输出纯文字（不读图），供主对话直接消费。
 """
@@ -171,7 +171,10 @@ def main():
     ap.add_argument("--find-all", action="store_true", help="搜全部模板")
     ap.add_argument("--shot", default="", help="目标截图")
     ap.add_argument("--scales", default="0.85,0.9,0.95,1.0,1.05,1.1,1.15", help="多尺度列表")
-    ap.add_argument("--min-score", type=float, default=0.70, help="匹配分下限")
+    ap.add_argument("--min-score", type=float, default=0.85,
+                    help="匹配分下限。实测：真命中 ≥0.95（同图标跨视口 0.951~0.986），"
+                         "0.55~0.65 是水体/地形误报——2026-09-20 用 0.55 在风息山口帧上"
+                         "搜出 3 处，只有 0.986 那处点的出面板，另两处点开的是「标记」面板")
     ap.add_argument("--top", type=int, default=10, help="每个模板最多报几处")
     ap.add_argument("--list", action="store_true", help="列出图标库")
     a = ap.parse_args()
