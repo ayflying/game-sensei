@@ -14,20 +14,26 @@
     python tools/icon_match.py --find 眠枭庇护所 --shot v11.png
     # 3) 一次搜全部模板
     python tools/icon_match.py --find-all --shot v11.png --min-score 0.85
+    # 4) 机器可读：只回一行「名称 分数 x y」，便于 shell 取坐标
+    python tools/icon_match.py --find 眠枭庇护所 --shot v11.png --at
+    # 5) 直接点击：命中最佳位置后调 drv.py 点掉（默认点两次，首点常被吞）
+    python tools/icon_match.py --find 眠枭庇护所 --shot v11.png --tap
 
 输出纯文字（不读图），供主对话直接消费。
 """
 import argparse
 import json
 import os
+import subprocess
 import sys
 
 import cv2
 import numpy as np
 
-LIB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       ".workbuddy", "nrc", "icon_atlas", "library")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LIB_DIR = os.path.join(ROOT, ".workbuddy", "nrc", "icon_atlas", "library")
 LIB_JSON = os.path.join(LIB_DIR, "library.json")
+DRV = os.path.join(ROOT, ".workbuddy", "nrc", "drv.py")   # 真机驱动（点击链路）
 
 
 def load_lib():
@@ -119,34 +125,70 @@ def match_one(shot, tmpl, scales, min_score):
     return keep
 
 
+def tap_hit(hit, a):
+    """把匹配到的图标直接点掉 —— 把「认图标」串进 drv.py 的点击链路。
+
+    默认点两次：实测本地图「首点被吞」极常见（开地图按钮、家园按钮都要点两次），
+    单次点击后帧差 ≈0 很容易被误判成「图标点不动」。
+    点击后请自行用 `drv.py shot` + `drv.py diff` 验证是否真的生效。
+    """
+    if not os.path.exists(DRV):
+        print(f"  未找到真机驱动：{DRV}", file=sys.stderr)
+        return
+    for i in range(a.tap_times):
+        subprocess.run([sys.executable, DRV, "tapx", str(hit["cx"]), str(hit["cy"]),
+                        str(a.tap_wait)], capture_output=True)
+        print(f"  tap#{i + 1} ({hit['cx']},{hit['cy']}) 等待 {a.tap_wait}ms", file=sys.stderr)
+
+
 def cmd_find(a):
     lib = load_lib()
     shot = imread(a.shot)
     if shot is None:
         print(f"读图失败：{a.shot}")
         return 1
-    names = [a.find] if a.find and a.find != "*" else (list(lib["templates"]) if not a.find_all else list(lib["templates"]))
+    names = [a.find] if a.find and a.find != "*" else list(lib["templates"])
     if not names:
         print("图标库为空。先用 --make 建模板。")
         return 1
     scales = [float(x) for x in a.scales.split(",")]
-    print(f"目标截图 {os.path.basename(a.shot)}  {shot.shape[1]}x{shot.shape[0]}   尺度 {scales}")
+    # --at / --tap 是机器可读模式：只回一行结果，不打人读标题（便于 shell 取值）
+    machine = a.at or a.tap
+    if not machine:
+        print(f"目标截图 {os.path.basename(a.shot)}  {shot.shape[1]}x{shot.shape[0]}   尺度 {scales}")
     total = 0
+    best = None
     for n in names:
         meta = lib["templates"].get(n)
         if not meta:
-            print(f"  未找到模板：{n}")
+            if not machine:
+                print(f"  未找到模板：{n}")
             continue
         tmpl = imread(os.path.join(LIB_DIR, meta["file"]))
         if tmpl is None:
-            print(f"  模板图读取失败：{meta['file']}")
+            if not machine:
+                print(f"  模板图读取失败：{meta['file']}")
             continue
         hits = match_one(shot, tmpl, scales, a.min_score)
         total += len(hits)
-        print(f"\n【{n}】命中 {len(hits)} 处（阈值 {a.min_score}）")
-        for h in hits[:a.top]:
-            print(f"   分数 {h['score']:.3f}  中心 ({h['cx']},{h['cy']})  "
-                  f"{h['w']}x{h['h']}  尺度 {h['scale']}")
+        for h in hits:
+            h["name"] = n
+            if best is None or h["score"] > best["score"]:
+                best = h
+        if not machine:
+            print(f"\n【{n}】命中 {len(hits)} 处（阈值 {a.min_score}）")
+            for h in hits[:a.top]:
+                print(f"   分数 {h['score']:.3f}  中心 ({h['cx']},{h['cy']})  "
+                      f"{h['w']}x{h['h']}  尺度 {h['scale']}")
+    if machine:
+        if best is None:
+            # 无命中回 MISS + 返回码 1，外层脚本据此走「先确认图标在屏」分支
+            print(f"MISS 阈值 {a.min_score}  {os.path.basename(a.shot)}")
+            return 1
+        print(f"{best['name']} {best['score']:.3f} {best['cx']} {best['cy']}")
+        if a.tap:
+            tap_hit(best, a)
+        return 0
     print(f"\n合计命中 {total} 处")
     return 0
 
@@ -176,6 +218,12 @@ def main():
                          "0.55~0.65 是水体/地形误报——2026-09-20 用 0.55 在风息山口帧上"
                          "搜出 3 处，只有 0.986 那处点的出面板，另两处点开的是「标记」面板")
     ap.add_argument("--top", type=int, default=10, help="每个模板最多报几处")
+    ap.add_argument("--at", action="store_true",
+                    help="机器可读：只回一行「名称 分数 x y」（无命中回 MISS 且返回码 1），便于 shell 取坐标")
+    ap.add_argument("--tap", action="store_true",
+                    help="命中最佳位置后直接调 drv.py 点击（隐含 --at；默认点两次，首点常被吞）")
+    ap.add_argument("--tap-times", type=int, default=2, help="--tap 的点击次数（默认 2）")
+    ap.add_argument("--tap-wait", type=int, default=1500, help="--tap 每次点击后等待毫秒")
     ap.add_argument("--list", action="store_true", help="列出图标库")
     a = ap.parse_args()
 
@@ -186,9 +234,9 @@ def main():
             print("--make 需要 --from-shot 与 --bbox")
             return 1
         return cmd_make(a)
-    if a.find or a.find_all:
+    if a.find or a.find_all or a.at or a.tap:
         if not a.shot:
-            print("--find 需要 --shot")
+            print("--find/--at/--tap 需要 --shot")
             return 1
         return cmd_find(a)
     ap.print_help()
