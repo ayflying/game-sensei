@@ -158,4 +158,4 @@
 - 圣剑面板为 09-19 数据，赛季中段平衡补丁可能变动，用前需复核
 
 ---
-*证据：F:/nrc-roco-video3/ocr3/fulltext.txt（OCR 全文）、.workbuddy/tmp/bili/vlm_pick_results.json（VLM 判读）、s4_verified.json（视频元数据）。*
+*证据（F 盘原始产物已按约定清理，证据留存项目内）：`.workbuddy/evidence/洛克王国世界/S4视频第三批/ocr3_fulltext.txt`（OCR 全文）、`vlm_pick_results.json`（VLM 判读）、`s4_verified.json`（视频元数据）。*
