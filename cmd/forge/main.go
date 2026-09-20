@@ -64,7 +64,8 @@ func main() {
 
 		market   = flag.Bool("market", false, "改跑「市场收单 → 挂单」循环（卖货线），而不是制作线")
 		sellItem = flag.String("sell", "加强木盾", "市场挂单要卖的物品名（-market 时生效）")
-		wait     = flag.Duration("wait", 2*time.Minute, "市场每轮之间的等待（-market 时生效）")
+		wait     = flag.Duration("wait", 30*time.Second, "市场每轮之间的额外间歇（-market 时生效）。成交等待已由 -sold 轮询负责，这里只是轮次间的喘息")
+		sold     = flag.Duration("sold", 12*time.Minute, "在途订单等成交的预算（-market 时生效）。用轮询而不是固定 sleep：实测成交时间在 3~10 分钟之间浮动，固定等待要么白等要么等不够")
 	)
 	flag.Parse()
 
@@ -100,7 +101,7 @@ func main() {
 		fmt.Printf("[forge] 市场卖货循环：物品=%s 轮数=%d 设备=%s\n", *sellItem, *rounds, *serial)
 		for r := 1; r <= *rounds; r++ {
 			fmt.Printf("\n=== 市场第 %d/%d 轮 ===\n", r, *rounds)
-			if err := b.marketRound(*sellItem); err != nil {
+			if err := b.marketRound(*sellItem, *sold); err != nil {
 				fmt.Printf("[forge] 第 %d 轮失败: %v（继续下一轮）\n", r, err)
 			}
 			if r < *rounds {
@@ -562,31 +563,90 @@ func (b *bot) ensureMarket() error {
 // 经验越多」——制作只加工匠经验，对扩建店铺卡的那个等级毫无帮助。
 // 而市场挂单实测几分钟内就成交（不是页面上写的 12 小时），
 // 所以「收单 → 挂单」是当前唯一能持续推进等级的确定性动作。
-func (b *bot) marketRound(item string) error {
+//
+// 槽位只有 1 个，所以节奏是「挂着等 → 成交收钱 → 立刻续挂」：
+// 若进轮时槽位还被在途订单占着，就先轮询等它成交，而不是固定 sleep
+// （实测成交在 3~10 分钟之间浮动，固定等待必然浪费轮次）。
+func (b *bot) marketRound(item string, soldBudget time.Duration) error {
 	if err := b.ensureMarket(); err != nil {
 		return fmt.Errorf("回市场页: %w", err)
 	}
-	collected := 0
+
+	// 先把已经成交、摆在下面等人的那一笔收掉。
+	if n := b.collectSales(); n > 0 {
+		fmt.Printf("  收单 %d 笔%s\n", n, b.readStatus())
+	}
+
+	// 槽位还被在途订单占着 → 等它成交后再收一次。
+	texts, err := b.frame()
+	if err != nil {
+		return err
+	}
+	if _, ok := pick(texts, "可用", 600, 1200); !ok {
+		if !b.waitSold(soldBudget, item) {
+			return fmt.Errorf("等待 %v 后订单仍未成交", soldBudget)
+		}
+		if n := b.collectSales(); n > 0 {
+			fmt.Printf("  收单 %d 笔%s\n", n, b.readStatus())
+		}
+	}
+	return b.listItem(item)
+}
+
+// collectSales 把当前页面上所有「获取」按钮点掉，返回点了几笔。
+func (b *bot) collectSales() int {
+	n := 0
 	for i := 0; i < 3; i++ {
 		texts, err := b.frame()
 		if err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "[forge] 抓帧失败: %v\n", err)
+			return n
 		}
 		got, ok := pick(texts, "获取", 600, 1200)
 		if !ok {
-			break
+			return n
 		}
 		if err := b.dev.Tap(got.CX(), got.CY()); err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "[forge] 点「获取」失败: %v\n", err)
+			return n
 		}
-		collected++
+		n++
 		fmt.Printf("  收单：点「获取」(%d,%d)\n", got.CX(), got.CY())
 		time.Sleep(b.delay)
 	}
-	if collected > 0 {
-		fmt.Printf("  收单 %d 笔%s\n", collected, b.readStatus())
+	return n
+}
+
+// waitSold 轮询等在途订单成交（页面出现「获取」），成交返回 true。
+//
+// 边等边清障：挂机久了会撞上「断开连接（错误4）」和各类奖励弹窗，
+// 不清掉的话「获取」永远不会出现，整批轮次就白跑了。
+func (b *bot) waitSold(budget time.Duration, item string) bool {
+	deadline := time.Now().Add(budget)
+	interval := 30 * time.Second
+	for {
+		texts, err := b.frame()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[forge] 抓帧失败: %v\n", err)
+			return false
+		}
+		if b.dismissExitDialog(texts) {
+			time.Sleep(b.delay)
+			continue
+		}
+		if b.clearModal(texts) {
+			time.Sleep(b.delay)
+			continue
+		}
+		if _, ok := pick(texts, "获取", 600, 1200); ok {
+			fmt.Printf("  等到了：%s 已成交\n", item)
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(interval)
 	}
-	return b.listItem(item)
 }
 
 // listItem 挂一张卖单：可用槽 → 创建订单 → 选品 → 下一步 ×N → 确定。
