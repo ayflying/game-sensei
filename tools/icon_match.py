@@ -26,6 +26,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 
 import cv2
 import numpy as np
@@ -125,20 +127,95 @@ def match_one(shot, tmpl, scales, min_score):
     return keep
 
 
-def tap_hit(hit, a):
-    """把匹配到的图标直接点掉 —— 把「认图标」串进 drv.py 的点击链路。
+def _adb_grab(adb, serial, dst):
+    """adb 直连抓一帧到本地（exec-out screencap -p）。成功返回 True。"""
+    try:
+        p = subprocess.run([adb, "-s", serial, "exec-out", "screencap", "-p"],
+                           capture_output=True, timeout=60)
+    except Exception:
+        return False
+    if not p.stdout or len(p.stdout) < 2000:
+        return False
+    try:
+        with open(dst, "wb") as f:
+            f.write(p.stdout)
+    except OSError:
+        return False
+    return True
 
-    默认点两次：实测本地图「首点被吞」极常见（开地图按钮、家园按钮都要点两次），
-    单次点击后帧差 ≈0 很容易被误判成「图标点不动」。
-    点击后请自行用 `drv.py shot` + `drv.py diff` 验证是否真的生效。
+
+def _frame_diff(a, b):
+    """两帧灰度降采样后的平均绝对差（与 drv.py diff 同口径）。失败返回 None。"""
+    try:
+        ia = cv2.imread(a, cv2.IMREAD_GRAYSCALE)
+        ib = cv2.imread(b, cv2.IMREAD_GRAYSCALE)
+        if ia is None or ib is None:
+            return None
+        ia = cv2.resize(ia, (320, 148)).astype(float)
+        ib = cv2.resize(ib, (320, 148)).astype(float)
+        return float(np.abs(ia - ib).mean())
+    except Exception:
+        return None
+
+
+def tap_hit(hit, a):
+    """把匹配到的图标直接点掉 —— 把「认图标」串进点击链路。
+
+    ⚠️ **别盲点两次**：本作地图上的图标有相当一部分是 **toggle**
+    （点一次开面板、再点一次关面板）。盲点两次时若两次都生效 ⇒ 开+关
+    ⇒ **逐像素回到原状（帧差 0.00）**，看起来和"点击根本没发出去"完全一样。
+    所以 `--tap-times` 默认已改为 **1**；需要"点一下没反应就再点一下"时，
+    用 **`--tap-verify`**（点后抓帧算帧差，与基准帧几乎无变化才补点一次）——
+    自适应补点让"首点被吞"和"toggle 已生效"两种情况都收敛到"已打开"。
+
+    ⚠️ 这里曾写过一个**错误结论**，一并更正（2026-09-21）：当时观察到
+    "python 内 subprocess 调 drv.py 点不动、命令行直接调就有效"，便断言
+    "沙箱会静默拦掉经 ≥2 层 python 的 input 注入"，并据此改了三处代码。
+    **因果推断是错的** —— 真相是那批对照实验里两次的**点击次数不同**
+    （一次 vs 两次），撞上了上面的 toggle 行为。判定实验（同一脚本内交替点、
+    每步只点一次）：探针点地图中部 23.19、点目标 18.42、再点一次又 18.42（与起点同画面）。
+    教训：**拿"点不动"当结论前先固定点击次数做对照**；
+    诊断脚本要**一次只变一个变量**。
+    直连 adb 仍然保留，但理由只是"少一层进程、更快"。
     """
-    if not os.path.exists(DRV):
-        print(f"  未找到真机驱动：{DRV}", file=sys.stderr)
+    adb = os.environ.get("NRC_ADB",
+                         r"C:/Users/ay/AppData/Local/Android/Sdk/platform-tools/adb.exe")
+    serial = os.environ.get("NRC_SERIAL", "ecbff3a5")
+    if not os.path.exists(adb):
+        print(f"  未找到 adb：{adb}（可用 NRC_ADB 环境变量指定）", file=sys.stderr)
         return
-    for i in range(a.tap_times):
-        subprocess.run([sys.executable, DRV, "tapx", str(hit["cx"]), str(hit["cy"]),
-                        str(a.tap_wait)], capture_output=True)
-        print(f"  tap#{i + 1} ({hit['cx']},{hit['cy']}) 等待 {a.tap_wait}ms", file=sys.stderr)
+    devnull = open(os.devnull, "wb")
+    try:
+        def _tap(tag=""):
+            subprocess.run([adb, "-s", serial, "shell", "input", "tap",
+                            str(int(hit["cx"])), str(int(hit["cy"]))],
+                           stdout=devnull, stderr=devnull)
+            print(f"  tap#{tag}({hit['cx']},{hit['cy']}) 等待 {a.tap_wait}ms", file=sys.stderr)
+            time.sleep(a.tap_wait / 1000.0)
+
+        for i in range(a.tap_times):
+            _tap(str(i + 1))
+
+        if a.tap_verify:
+            tmp = os.path.join(tempfile.gettempdir(), "_icon_match_verify.png")
+            for _ in range(2):
+                if not _adb_grab(adb, serial, tmp):
+                    print("  验证：抓帧失败，跳过", file=sys.stderr)
+                    break
+                d = _frame_diff(a.shot, tmp)
+                if d is None:
+                    break
+                if d >= a.verify_min:
+                    print(f"  验证：帧差 {d:.2f} ⇒ 已生效", file=sys.stderr)
+                    break
+                print(f"  验证：帧差 {d:.2f} < {a.verify_min} ⇒ 疑首点被吞，补点一次", file=sys.stderr)
+                _tap("补")
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    finally:
+        devnull.close()
 
 
 def cmd_find(a):
@@ -303,7 +380,12 @@ def main():
     ap.add_argument("--find", default="", help="要搜的模板名；传 * 搜全部")
     ap.add_argument("--find-all", action="store_true", help="搜全部模板")
     ap.add_argument("--shot", default="", help="目标截图")
-    ap.add_argument("--scales", default="0.85,0.9,0.95,1.0,1.05,1.1,1.15", help="多尺度列表")
+    # 默认只跑尺度 1.0：实测（09-21）MIX3 2340×1080 上全库 22 条命中**全部落在尺度 1.0**，
+    # 游戏 UI 图标是固定像素尺寸、不随视口缩放。原默认 7 个尺度（0.85~1.15）让
+    # 「24 模板 × 7 尺度 = 168 次全图 matchTemplate」白跑 6/7，单次全库定位 20.6s；
+    # 砍到单尺度后 ≈3s。需要容忍缩放的场景（跨分辨率复用模板）显式传 --scales 即可。
+    ap.add_argument("--scales", default="1.0", help="多尺度列表。默认 1.0（游戏 UI 图标不缩放）；"
+                                                   "跨分辨率复用模板时才需要如 0.9,0.95,1.0,1.05,1.1")
     ap.add_argument("--min-score", type=float, default=0.85,
                     help="匹配分下限。实测：真命中 ≥0.95（同图标跨视口 0.951~0.986），"
                          "0.55~0.65 是水体/地形误报——2026-09-20 用 0.55 在风息山口帧上"
@@ -312,9 +394,15 @@ def main():
     ap.add_argument("--at", action="store_true",
                     help="机器可读：只回一行「名称 分数 x y」（无命中回 MISS 且返回码 1），便于 shell 取坐标")
     ap.add_argument("--tap", action="store_true",
-                    help="命中最佳位置后直接调 drv.py 点击（隐含 --at；默认点两次，首点常被吞）")
-    ap.add_argument("--tap-times", type=int, default=2, help="--tap 的点击次数（默认 2）")
+                    help="命中最佳位置后直接点击（隐含 --at；默认点 1 次，见 --tap-verify）")
+    ap.add_argument("--tap-times", type=int, default=1,
+                    help="--tap 的点击次数（默认 1）。⚠️ 别盲目调大：本作图标多为 toggle，"
+                         "点两次会「开了又关」、帧差 0.00，看起来像点不动。想容错请用 --tap-verify")
     ap.add_argument("--tap-wait", type=int, default=1500, help="--tap 每次点击后等待毫秒")
+    ap.add_argument("--tap-verify", action="store_true",
+                    help="点击后抓帧算帧差，与基准帧（--shot）几乎无变化才补点一次（自适应，推荐）")
+    ap.add_argument("--verify-min", type=float, default=3.0,
+                    help="--tap-verify 的「已生效」帧差阈值（默认 3.0）")
     ap.add_argument("--list", action="store_true", help="列出图标库")
     ap.add_argument("--rename", default="",
                     help="改名：「旧名=新名」（模板文件名与清单键一起改，可配 --note 记原因）")
