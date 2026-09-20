@@ -468,7 +468,7 @@ def cmd_intake(a):
     if not picks:
         print("没选到帧。用 --pick 显式指定，或确认目录里有 png。")
         return 1
-    extra = a.extra.split() if a.extra else []
+    extra = a.extra_list
 
     os.makedirs(a.out, exist_ok=True)
     print(f"① 逐帧提取（{len(picks)} 帧）")
@@ -497,7 +497,10 @@ def cmd_intake(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames-dir", default="", help="关键帧目录（png，文件名=帧名）")
-    ap.add_argument("--pick", default="", help="要处理的帧名，逗号分隔（不给则取最新 N 帧）")
+    ap.add_argument("--pick", default="",
+                    help="要处理的帧名，逗号分隔（不给则取最新 N 帧）。"
+                         "⚠️ 请**尽量覆盖不同视口/不同界面**：类型分类靠坐标是否漂移，"
+                         "若给的全是同一视口的多帧，内容相同、坐标一致，会把一切都判成 ui")
     ap.add_argument("--max-frames", type=int, default=8, help="未给 --pick 时取最新几帧")
     ap.add_argument("--out", default="", help="产出目录")
     ap.add_argument("--top", type=int, default=50, help="清单最多列几组（按类型/频次排序）")
@@ -510,11 +513,16 @@ def main():
                     help="已入库标注用的多尺度列表")
     ap.add_argument("--known-dist", type=int, default=14,
                     help="已入库标注的坐标容差（碎片化图标中心天然有偏差，别调太小）")
-    ap.add_argument("--extra", default="", help="透传给 icon_extract 的参数（如 --no-texture）")
+    ap.add_argument("--extra", default="",
+                    help="透传给 icon_extract 的参数；以 -- 开头的值请用 --extra=--no-texture，"
+                         "或直接裸写在命令里（未知参数会自动透传）")
     ap.add_argument("--apply", default="", help="回填后的 checklist.md 路径（批量入库）")
     ap.add_argument("--pad", type=int, default=3, help="建模板时四向留边")
     ap.add_argument("--regress", action="store_true", help="入库后跑一次 icon_regression")
-    a = ap.parse_args()
+    # 未知参数原样透传给 icon_extract：`--extra "--no-texture"` 会被 argparse 当成选项而报错，
+    # 裸写 `--no-texture` 反而更顺手（与 tools/icon_regression.py 同一套做法）
+    a, unknown = ap.parse_known_args()
+    a.extra_list = list(unknown) + (a.extra.split() if a.extra else [])
 
     if a.apply:
         return cmd_apply(a)
