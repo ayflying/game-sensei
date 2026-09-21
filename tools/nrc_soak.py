@@ -27,12 +27,14 @@
 """
 
 import argparse
+import atexit
 import json
 import os
 import re
 import statistics
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -83,6 +85,12 @@ SWALLOW_DIFF = 3.0
 MAP_SAME_DIFF = 1.0
 # 单次点击后的等待（毫秒）：面板弹出实测 <1s，留 1.2s 余量
 TAP_WAIT = 1200
+# 抓帧兜底（2026-09-21 长测踩到）：单次抓帧正常 ~2.1s，实测偶发一次 **39.2s**
+# （adb/设备层卡顿），而且那帧内容不可信（帧差 60.64 vs 同目标其他轮 30.98
+# —— 慢帧往往抓在**画面过渡态**上）。不加兜底会直接把"点击反应"判歪。
+SHOT_TIMEOUT = 60       # 单次抓帧子进程超时（秒）；正常 2s，给 30 倍余量
+SHOT_SLOW_MS = 8000     # 超过此耗时 ⇒ 判为可疑慢帧，丢弃重抓（正常 2.1s，4 倍余量）
+SHOT_MAX_TRY = 2        # 最多抓几次（1 次正常 + 1 次重抓）
 # 地图界面的「固定 UI 锚点」：这两条同时命中 ⇒ 必在地图界面（免整帧 OCR 判态）
 # 依据：icon_crossframe.py 实测二者都是多帧同坐标的固定 UI（家园 (2152,1029)、
 # 眠枭庇护所(地图UI) (188,187)），且只在地图界面存在。
@@ -101,21 +109,61 @@ def shot(tag, rec):
 
     用 drv.py 的 shotq（只抓帧、不跑 judge）：一审 judge 要读图算三个指标，
     本轮巡检并不需要界面判断（而且 judge 对地图界面本来就误判成 WORLD）。
+
+    ⚠️ **超时 + 慢帧重抓**（2026-09-21 长测踩到，见 SHOT_* 常量注释）：
+      16 轮里有一次"点击后抓帧"花了 39.2s（同轮其他抓帧 2.1s），且那帧
+      帧差 60.64、与同目标其他轮的 30.98 明显不同 —— 慢帧通常抓在画面
+      过渡态上，内容不可信，会把"点击反应"的判定直接带偏。
+    记账口径：**最终采用那次**的耗时进 shot_ms（汇总统计不变）；
+    被丢弃的慢帧/失败尝试进 shot_retry_ms；重抓次数累加进 shot_tries。
     """
-    t0 = time.time()
-    rc, out, err = run([PY, DRV, "shotq", tag])
-    dt = time.time() - t0
-    rec.setdefault("shot_ms", []).append(round(dt * 1000))
     path = None
-    m = re.search(r"([A-Za-z]:[^\s]*%s\.png)" % re.escape(tag), out)
-    if m:
-        path = m.group(1)
-    if path is None:
-        cand = os.path.join(SHOTDIR, tag + ".png")
-        if os.path.exists(cand):
-            path = cand
+    last_err = ""
+    for attempt in range(1, SHOT_MAX_TRY + 1):
+        t0 = time.time()
+        try:
+            rc, out, err = run([PY, DRV, "shotq", tag], timeout=SHOT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            rc, out, err = -1, "", "抓帧子进程超时 >%ds" % SHOT_TIMEOUT
+        dt_ms = round((time.time() - t0) * 1000)
+        cand = None
+        m = re.search(r"([A-Za-z]:[^\s]*%s\.png)" % re.escape(tag), out)
+        if m:
+            cand = m.group(1)
+        if cand is None or not os.path.exists(cand):
+            c2 = os.path.join(SHOTDIR, tag + ".png")
+            if os.path.exists(c2):
+                cand = c2
+        if cand is None or not os.path.exists(cand):
+            last_err = "rc=%d out=%r err=%r" % (rc, out[:200], err[:200])
+            rec.setdefault("shot_retry_ms", []).append(dt_ms)
+            continue
+        # ⚠️ 新鲜度校验（离线单测暴露的真 bug）：SHOTDIR/<tag>.png 是**同名复用**的，
+        # 抓帧失败时上一轮的旧帧还在那里 ⇒ 兜底会把它当成本次结果返回，
+        # 于是"抓帧失败"被静默变成"拿到旧帧"（本轮点击/复位的判据就全建在旧画面上）。
+        # 判据：文件必须比本次抓帧开始时间新。
+        if os.path.getmtime(cand) < t0 - 0.5:
+            last_err = "拿到旧帧（mtime 早于本次抓帧）：%s" % cand
+            rec.setdefault("shot_retry_ms", []).append(dt_ms)
+            continue
+        # 慢帧：很可能抓在过渡态，丢弃重抓（最后一次仍慢就只能接受）
+        if dt_ms > SHOT_SLOW_MS and attempt < SHOT_MAX_TRY:
+            rec.setdefault("shot_retry_ms", []).append(dt_ms)
+            rec["shot_slow"] = rec.get("shot_slow", 0) + 1
+            # 把慢帧挪到 .png.slow，别让它继续占着 <tag>.png：
+            # 否则下一次抓帧失败时，兜底会把这个被丢弃的慢帧当成本次结果返回。
+            # 留 .slow 后缀是刻意的——不匹配 *.png，不会被当成正常帧，也便于事后查证。
+            try:
+                os.replace(cand, cand + ".slow")
+            except OSError:
+                pass
+            continue
+        path = cand
+        rec.setdefault("shot_ms", []).append(dt_ms)
+        rec["shot_tries"] = rec.get("shot_tries", 0) + attempt
+        break
     if path is None or not os.path.exists(path):
-        raise RuntimeError("抓帧失败 tag=%s rc=%d out=%r err=%r" % (tag, rc, out[:300], err[:300]))
+        raise RuntimeError("抓帧失败 tag=%s 试了 %d 次 %s" % (tag, SHOT_MAX_TRY, last_err))
     return path
 
 
@@ -145,20 +193,182 @@ def locate(frame, rec, min_score=0.85):
     return hits, dt
 
 
-def ocr_lines(frame, min_conf=0.30):
-    """返回 [(x, y, 文本)]；OCR 不可用时返回空表（不阻断巡检）。"""
-    if not os.path.exists(OCR_EXE):
-        return []
+# 帧级 OCR 缓存：同一张帧只识别一次。
+#
+# 为什么需要：整帧 OCR 实测 4.1s（2340x1080），而单轮里同一帧会被问多次
+# （detect_state 判态要文字、before_txt 要文字）。缓存后重复问等于零成本。
+# 键含文件大小与 mtime：抓帧会**覆盖同名文件**（reset_probeNN 之类），
+# 只按路径做键会把旧结果当成新帧的，属于"自证式"错误。
+_OCR_CACHE = {}
+
+
+def _cache_key(frame, min_conf):
     try:
-        rc, out, err = run([OCR_EXE, "-in", frame, "-min", str(min_conf)], timeout=120)
-    except Exception:
-        return []
-    lines = []
-    for line in out.splitlines():
-        m = re.match(r"\(\s*(\d+),\s*(\d+)\)\s+(.*?)\s+\[([\d.]+)\]$", line.strip())
-        if m:
-            lines.append((int(m.group(1)), int(m.group(2)), m.group(3)))
+        st = os.stat(frame)
+        return (os.path.abspath(frame), int(st.st_mtime_ns), st.st_size, min_conf)
+    except OSError:
+        return (os.path.abspath(frame), 0, 0, min_conf)
+
+
+def ocr_lines(frame, min_conf=0.30):
+    """返回 [(x, y, 文本)]；OCR 不可用时返回空表（不阻断巡检）。带帧级缓存。"""
+    key = _cache_key(frame, min_conf)
+    if key in _OCR_CACHE:
+        return _OCR_CACHE[key]
+    lines = ocr_lines_many([frame], min_conf).get(os.path.abspath(frame), [])
+    _OCR_CACHE[key] = lines
     return lines
+
+
+# ---- 常驻 OCR 通道（ocr.exe -serve）----
+#
+# 为什么要常驻：`ocr.exe -in a -in b` 能把**一次调用内**的多张图合并（省一次冷启动），
+# 但**跨调用**的冷启动省不掉 —— 每轮跑批各调一次，就等于每轮白付 2.2s。
+# 实测同一台机器（2340x1080 帧）：
+#
+#     CLI 两次独立调用   = 8.28s（两次冷启动 + 两次识别）
+#     CLI 一次调用两张   = 6.06s（一次冷启动 + 两次识别）
+#     常驻模式两张       = 约 4.5s（整批只付一次冷启动；单帧纯识别 2.25s）
+#
+# 协议是 JSON 行：{"file":...} → {"file":...,"items":[...]}，见 `cmd/ocr -serve`。
+#
+# 失败策略：进程死了/管道断了就把它标死并**回落 CLI**，不让 OCR 成为单点。
+_SERVER = None
+_SERVER_DEAD = False
+# 通道是**单条** stdin/stdout 协议：两个线程同时发请求会把请求行与应答行交错，
+# 拿到的是别人的结果。预热线程与主线程都要用它，必须串行化。
+_SERVER_LOCK = threading.Lock()
+
+
+def _server():
+    """懒启动常驻通道；不可用返回 None（调用方回落 CLI）。"""
+    global _SERVER, _SERVER_DEAD
+    if _SERVER is not None or _SERVER_DEAD:
+        return _SERVER
+    if not os.path.exists(OCR_EXE):
+        _SERVER_DEAD = True
+        return None
+    try:
+        _SERVER = subprocess.Popen(
+            [OCR_EXE, "-serve"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        _SERVER, _SERVER_DEAD = None, True
+    return _SERVER
+
+
+def close_server():
+    """跑批结束时收掉常驻进程（不收会一直占着模型内存）。"""
+    global _SERVER, _SERVER_DEAD
+    p = _SERVER
+    _SERVER, _SERVER_DEAD = None, True
+    if p is None:
+        return
+    try:
+        p.stdin.write(b'{"cmd":"exit"}\n')
+        p.stdin.flush()
+        p.wait(timeout=10)
+    except Exception:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+def _ask_server(frames, min_conf):
+    """走常驻通道逐帧识别。返回 {绝对路径: lines}；通道不可用时返回 None。
+
+    ⚠️ min_conf 在这边过滤：`-serve` 协议固定回全部结果（引擎侧阈值 0），
+    过滤交给调用方 —— 这样同一个常驻进程能服务不同阈值的调用。
+    """
+    p = _server()
+    if p is None:
+        return None
+    got = {}
+    # 上锁后**再查一次缓存**：等锁期间别的线程（如预热线程）可能已经把同一帧
+    # 算完了，这时直接取结果，不必再发一次请求。
+    with _SERVER_LOCK:
+        for f in frames:
+            ap = os.path.abspath(f)
+            key = _cache_key(f, min_conf)
+            if key in _OCR_CACHE:
+                got[ap] = _OCR_CACHE[key]
+                continue
+            try:
+                p.stdin.write((json.dumps({"file": ap}) + "\n").encode("utf-8"))
+                p.stdin.flush()
+                line = p.stdout.readline()
+            except Exception:
+                line = b""
+            if not line:
+                # 进程没了或协议断了：剩下的帧交回调用方走 CLI，并把通道标死，
+                # 免得后面每帧都白等一次。
+                close_server()
+                return None
+            try:
+                res = json.loads(line.decode("utf-8"))
+            except Exception:
+                continue
+            lines = []
+            for it in res.get("items") or []:
+                if float(it.get("score", 1.0)) < min_conf:
+                    continue
+                lines.append((int(it.get("cx", 0)), int(it.get("cy", 0)), it.get("text", "")))
+            got[ap] = lines
+            _OCR_CACHE[key] = lines
+    return got
+
+
+def _ocr_cli(frames, min_conf):
+    """回落路径：`ocr.exe -json -in a -in b`，一次调用识别多帧。"""
+    out_map = {}
+    args = [OCR_EXE, "-json", "-min", str(min_conf)]
+    for f in frames:
+        args += ["-in", f]
+    try:
+        rc, out, err = run(args, timeout=300)
+        data = json.loads(out)
+    except Exception:
+        data = []
+    for res in data:
+        lines = []
+        for it in res.get("items") or []:
+            lines.append((int(it.get("cx", 0)), int(it.get("cy", 0)), it.get("text", "")))
+        ap = os.path.abspath(res.get("file", ""))
+        out_map[ap] = lines
+        _OCR_CACHE[_cache_key(res.get("file", ""), min_conf)] = lines
+    return out_map
+
+
+def ocr_lines_many(frames, min_conf=0.30):
+    """拿多帧的文字，返回 {绝对路径: [(x, y, 文本)]}。优先常驻通道，失败回落 CLI。"""
+    frames = [f for f in frames if f]
+    out_map = {}
+    if not frames:
+        return out_map
+    # 先分流：已缓存的直接取，只把没算过的送进引擎（去重）
+    todo, seen = [], set()
+    for f in frames:
+        ap = os.path.abspath(f)
+        if ap in seen:
+            continue
+        seen.add(ap)
+        key = _cache_key(f, min_conf)
+        if key in _OCR_CACHE:
+            out_map[ap] = _OCR_CACHE[key]
+        else:
+            todo.append(f)
+    if todo:
+        got = _ask_server(todo, min_conf)
+        if got is None:
+            got = _ocr_cli(todo, min_conf)
+        out_map.update(got)
+    # 补上没回结果的帧（识别失败等），保证调用方总能拿到键
+    for f in frames:
+        out_map.setdefault(os.path.abspath(f), [])
+    return out_map
 
 
 def ocr_texts(frame, min_conf=0.30):
@@ -343,6 +553,7 @@ def tap_once_verified(x, y, base, tag, rec, wait_ms=TAP_WAIT,
 
 
 def main():
+    global SHOT_SLOW_MS          # 允许命令行收紧"慢帧"阈值（仅为验证兜底逻辑）
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=10, help="跑多少轮")
     ap.add_argument("--out", default=".workbuddy/evidence/nrc/20260921-soak", help="证据目录")
@@ -351,11 +562,17 @@ def main():
     ap.add_argument("--pre-check", action="store_true",
                     help="点击前额外抓一帧复核状态（更保险，但每轮多花 1.9s；实测漂移恒为 0）")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--shot-slow-ms", type=int, default=SHOT_SLOW_MS,
+                    help="单次抓帧超过此毫秒数即判为慢帧、丢弃重抓（默认 %d）。"
+                         "调小可**强制触发重抓**，用来验证兜底逻辑在真机上的行为"
+                         "（正常抓帧 ~2.1s，调成 500 会让每帧都重抓一次）" % SHOT_SLOW_MS)
     ap.add_argument("--targets", default="",
                     help="点击目标（逗号分隔的图标名）；默认全部轮换。"
                          "传单个名即退化为单目标模式。可选："
                          + " / ".join(t["name"] for t in TARGETS))
     a = ap.parse_args()
+
+    SHOT_SLOW_MS = a.shot_slow_ms
 
     # 选目标：默认全部轮换（每轮一个，按序循环）
     if a.targets.strip():
@@ -418,8 +635,15 @@ def main():
             # ---- 1) 基准帧就绪 ----
             r["base"] = os.path.basename(base)
 
-            # ---- 2) 全库定位 ----
+            # ---- 2) 全库定位（与 base 的 OCR 并行）----
+            # 两者互不依赖：定位只看像素、OCR 只看文字。串行做等于白等一次
+            # 识别（实测 1.9s/帧）。这个线程只负责「预热」——结果会落进
+            # _OCR_CACHE，后面 ocr_lines_many([base, after]) 直接命中缓存，
+            # 不会重复识别。所以即使 join 超时也不影响正确性，只是白跑。
+            warm = threading.Thread(target=lambda: ocr_lines_many([base]), daemon=True)
+            warm.start()
             hits, loc_dt = locate(base, r, a.min_score)
+            warm.join(timeout=120)
             r["locate_hits"] = len(hits)
             r["locate_sec"] = round(loc_dt, 2)
             r["hits"] = {k: [round(v[0], 3), v[1], v[2]] for k, v in sorted(hits.items())}
@@ -480,8 +704,11 @@ def main():
             # ---- 4) 判定反应（帧差 + OCR 新增文字）----
             r["after"] = os.path.basename(after)
             r["diff"] = None if d is None else round(d, 2)
-            before_txt = {(x, y, t) for x, y, t in ocr_lines(base)}
-            after_lines = ocr_lines(after)
+            # base 与 after 一次送进引擎：两次独立调用要各付一次冷启动（2.2s），
+            # 合并后只付一次。判"新增了哪些文字"本来就要两张一起看，天然适合合并。
+            both = ocr_lines_many([base, after])
+            before_txt = {(x, y, t) for x, y, t in both.get(os.path.abspath(base), [])}
+            after_lines = both.get(os.path.abspath(after), [])
             new_txt = [t for x, y, t in after_lines if (x, y, t) not in before_txt]
             r["new_texts"] = new_txt[:8]
             # 门槛按目标类型取：面板类 8.0、标签类 1.5（皮卡月刊实测帧差仅 2.04，
@@ -518,7 +745,11 @@ def main():
             d2 = diff_two(base, rst)
             r["reset_diff"] = None if d2 is None else round(d2, 2)
             r["reset_ok"] = rst_ok
-            r["reset_texts"] = [t for x, y, t in ocr_lines(rst)][:8]
+            # reset_texts 只用于报告展示。复位成功时跳过（整帧 OCR 4.1s）——
+            # "是否真回到地图"由状态机（reset_ok）负责，不靠这段文字；
+            # 失败时反而必须识别：那正是需要看"卡在什么界面"的时刻。
+            r["reset_texts"] = ([t for x, y, t in ocr_lines(rst)][:8]
+                                if (not rst_ok or a.verbose) else [])
             if rst_ok:
                 prev_map = rst          # 给下一轮起点守卫当 ref
 
@@ -577,6 +808,12 @@ def main():
             rec["summary"][key + "_avg"] = round(statistics.mean(v))
             rec["summary"][key + "_max"] = max(v)
             rec["summary"][key + "_n"] = len(v)
+    # 抓帧兜底统计：被丢弃的慢帧/失败尝试单独记，免得偶发卡顿被均值抹平
+    retry_ms = flat("shot_retry_ms")
+    rec["summary"]["shot_slow_rounds"] = len([r for r in rs if r.get("shot_slow")])
+    rec["summary"]["shot_retry_n"] = len(retry_ms)
+    if retry_ms:
+        rec["summary"]["shot_retry_max_ms"] = max(retry_ms)
     for key, label in (("round_sec", "单轮"), ("tap_sec", "点击"), ("reset_sec", "复位")):
         v = vals(key)
         if v:
@@ -602,8 +839,17 @@ def main():
     if per:
         rec["summary"]["per_target"] = per
 
+    # 写两份：soak.json 固定名（方便下游脚本直接读），外加一份带时间戳的存档。
+    # ⚠️ 只写固定名会被**下一次跑批覆盖** —— 实测同一目录连跑 10/10/20 轮后，
+    # 只剩最后一次的记录，前两次的证据没了。这是本项目**第三次**踩"同名文件覆盖"
+    # （探针帧名 → 抓帧兜底旧帧 → 证据本身），病根都是"同名复用 + 无人校验新鲜度"。
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    rec["_archive"] = "soak-%s-%dr.json" % (stamp, len(rec["rounds"]))
+    blob = json.dumps(rec, ensure_ascii=False, indent=2)
     with open(os.path.join(out_dir, "soak.json"), "w", encoding="utf-8") as f:
-        json.dump(rec, f, ensure_ascii=False, indent=2)
+        f.write(blob)
+    with open(os.path.join(out_dir, rec["_archive"]), "w", encoding="utf-8") as f:
+        f.write(blob)
 
     s = rec["summary"]
     print("=" * 68)
@@ -624,12 +870,22 @@ def main():
                      v.get("expect") or "-"))
     print("  全库定位命中均值 : %s 条/轮" % s["locate_hits_avg"])
     print("  平均抓帧        : %s ms（最慢 %s）" % (s.get("shot_ms_avg"), s.get("shot_ms_max")))
+    if s.get("shot_retry_n"):
+        print("  抓帧兜底        : %d 轮出现慢帧 / 丢弃重抓 %d 次（最慢被弃 %s ms）"
+              % (s.get("shot_slow_rounds"), s.get("shot_retry_n"),
+                 s.get("shot_retry_max_ms")))
     print("  平均全库定位    : %s ms（最慢 %s）" % (s.get("locate_ms_avg"), s.get("locate_ms_max")))
     print("  平均单轮        : %s s" % s.get("round_sec_avg"))
     print("证据：%s" % os.path.join(a.out, "soak.json"))
+    if rec.get("_archive"):
+        print("存档：%s（soak.json 会被下次跑批覆盖，带时间戳的这份不会）"
+              % os.path.join(a.out, rec["_archive"]))
     print("=" * 68)
     return 0
 
 
 if __name__ == "__main__":
+    # 常驻 OCR 进程用 atexit 兜底关闭：正常结束、异常退出、Ctrl-C 都能收掉，
+    # 不留一个占着模型内存的孤儿进程。
+    atexit.register(close_server)
     sys.exit(main())
