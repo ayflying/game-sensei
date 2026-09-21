@@ -482,15 +482,18 @@ def detect_state(frame, hits=None, ref=None):
         本来就是这么排的，当时漏了家园浮层这一种）。
 
     ⚡ 两条**免 OCR 快路径**（整帧 OCR 实测 3.6s，是单轮最大的单项开销）：
-      1) 传入 hits（本轮全库定位结果）且命中多个「固定 UI 锚点」⇒ 必是地图界面。
-         定位本来就要跑，这一步等于零成本。
-         （家园浮层开着时「家园」图标被浮层盖住 ⇒ 锚点凑不齐 ⇒ 快路径天然不误触发。）
-      2) 传入 ref（一张已确认是地图的参考帧）且与它逐像素接近 ⇒ 地图界面。
+      1) 传入 ref（一张已确认是地图的参考帧）且与它逐像素接近 ⇒ 地图界面。
          复位最后一步"回到 map"正是这种情况，帧差 ≈0，不必再 OCR 一次。
+         ⚠️ 这条**可靠**（叠加层会让帧差变大），所以排在 OCR 之前。
+      2) 传入 hits（本轮全库定位结果）里的两个固定 UI 锚点 ⇒ 像素级证据。
+         ⚠️ 但它**只能当"必要条件"、不能当"充分条件"**，必须排在叠加层判据**之后**：
+         区域进度面板打开时，地图左侧的「家园」「眠枭庇护所(地图UI)」**仍在屏**，
+         锚点照样齐（2026-09-21 实测 panel 态命中 9 条、两个锚点都在）
+         ⇒ 若把锚点快路径放最前，panel 会被判成 map（我当天就这么错了一次）。
+         反过来，"OCR 见到地图词"也不充分（大世界 / 家园场景 / **地图关闭过渡帧**都有）。
+         ⇒ 所以只有"锚点齐"才是可靠的地图证据；锚点不齐就退 unknown，交守卫复位。
     两条都不成立才落回 OCR 语义判态（宁可慢，不能误判）。
     """
-    if hits and MAP_ANCHORS.issubset(hits):
-        return "map"
     if ref is not None:
         d = diff_two(ref, frame)
         # 阈值用 MAP_SAME_DIFF(1.0) 而不是 SWALLOW_DIFF(3.0)：这里要的是
@@ -501,16 +504,19 @@ def detect_state(frame, hits=None, ref=None):
             return "map"
     txt = ocr_texts(frame)
     joined = " ".join(txt)
+    # ⚠️ 叠加层判据必须排在"地图"判据之前：它们都**盖在地图上**，地图固有词仍在屏。
     if "触碰" in joined:
         return "world"
     if "标记（点击修改名称）" in joined or "标记(点击修改名称)" in joined:
         return "marker_edit"
     if "风眠省" in joined or "15/15" in joined:
         return "panel"
-    # 叠加层判据必须在 map 之前（见 docstring）：这三个词是家园浮层独有的，
-    # 干净地图实测一个都不出现。
+    # 这三个词是家园浮层独有（干净地图实测一个都不出现）。
     if "舒适度" in joined or "当前居住精灵" in joined or "当前种植植物" in joined:
         return "home_panel"
+    # 到了这里才判"是不是地图"：有 hits 就**以锚点为准**（必要条件，见 docstring）。
+    if hits is not None:
+        return "map" if MAP_ANCHORS.issubset(hits) else "unknown"
     if "精灵踪迹" in joined or "卡洛西亚大陆" in joined:
         return "map"
     return "unknown"
