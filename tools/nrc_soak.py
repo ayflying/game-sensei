@@ -31,6 +31,7 @@ import atexit
 import json
 import os
 import re
+import shutil
 import statistics
 import struct
 import subprocess
@@ -44,6 +45,10 @@ DRV = os.path.join(ROOT, ".workbuddy", "nrc", "drv.py")
 ICON_MATCH = os.path.join(ROOT, "tools", "icon_match.py")
 OCR_EXE = os.path.join(ROOT, ".workbuddy", "bin", "ocr.exe")
 SHOTDIR = os.path.join(ROOT, ".workbuddy", "tmp", "screenshots", "nrc-20260918")
+# 过渡帧样本目录（坑⑥ 现场那类帧：地图文字还在、图标已消失 ⇒ OCR 会判 map）。
+# 复位确认分支一旦判出"隔一帧后已不是 map"，就顺手把那一帧存到这里 —— 帧已在盘上，
+# **零额外成本**；攒够就能补进离线回归集（tools/nrc_state_regress.py 里那一格还空着）。
+TRANS_DIR = os.path.join(ROOT, ".workbuddy", "evidence", "nrc", "regress-frames", "candidates")
 # 点击直连 adb：少一层 python 进程、更快，也让耗时统计干净（见 tap_px 注释）
 ADB = os.environ.get("NRC_ADB",
                      r"C:/Users/ay/AppData/Local/Android/Sdk/platform-tools/adb.exe")
@@ -526,6 +531,21 @@ def detect_state(frame, hits=None, ref=None):
     return "unknown"
 
 
+def _keep_transition_sample(frame, rec):
+    """把"被判成 map、隔一帧却不是 map"的帧存成过渡帧候选（坑⑥ 现场）。
+
+    零额外成本（帧已经在盘上）。目的：那类帧一直没存档 ⇒ 离线回归集里
+    「地图关闭过渡帧」这一格始终空着；跑批顺手攒样本，攒到就补进 CASES。
+    """
+    try:
+        os.makedirs(TRANS_DIR, exist_ok=True)
+        dst = os.path.join(TRANS_DIR, "transition_%s.png" % time.strftime("%Y%m%d-%H%M%S"))
+        shutil.copyfile(frame, dst)
+        rec.setdefault("transition_samples", []).append(os.path.basename(dst))
+    except Exception:
+        pass
+
+
 def reset_to_map(rec, max_attempts=5, verbose=True, ref=None,
                  initial=None, initial_state=None, tag_prefix=None):
     """OCR 驱动的状态机复位：把界面稳定拉回「地图界面」。
@@ -576,6 +596,7 @@ def reset_to_map(rec, max_attempts=5, verbose=True, ref=None,
                 f2 = shot("%s_confirm%02d" % (tag_prefix, i), rec)
                 if detect_state(f2) != "map":
                     steps[-1] = "map_unstable"      # 留痕：这一步曾误判成 map
+                    _keep_transition_sample(f, rec)  # 顺手留样本（零成本）
                     continue
                 f = f2
             rec["reset_attempts"] = i
