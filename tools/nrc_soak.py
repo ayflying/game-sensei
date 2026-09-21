@@ -507,7 +507,11 @@ def detect_state(frame, hits=None, ref=None):
     # ⚠️ 叠加层判据必须排在"地图"判据之前：它们都**盖在地图上**，地图固有词仍在屏。
     if "触碰" in joined:
         return "world"
-    if "标记（点击修改名称）" in joined or "标记(点击修改名称)" in joined:
+    # ⚠️ 长词不够用：OCR 会把「点击修改名称」认成「点击修破名称」
+    #（2026-09-21 离线回归集 s_now5_panel.png 实测：命中 0 条 ⇒ 漏判成 unknown）。
+    # 「常规标记数」是标记界面独有词，与长词互补，一起用才收得住。
+    if ("标记（点击修改名称）" in joined or "标记(点击修改名称)" in joined
+            or "常规标记数" in joined):
         return "marker_edit"
     if "风眠省" in joined or "15/15" in joined:
         return "panel"
