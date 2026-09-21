@@ -32,6 +32,7 @@ import json
 import os
 import re
 import statistics
+import struct
 import subprocess
 import sys
 import threading
@@ -89,8 +90,22 @@ TAP_WAIT = 1200
 # （adb/设备层卡顿），而且那帧内容不可信（帧差 60.64 vs 同目标其他轮 30.98
 # —— 慢帧往往抓在**画面过渡态**上）。不加兜底会直接把"点击反应"判歪。
 SHOT_TIMEOUT = 60       # 单次抓帧子进程超时（秒）；正常 2s，给 30 倍余量
-SHOT_SLOW_MS = 8000     # 超过此耗时 ⇒ 判为可疑慢帧，丢弃重抓（正常 2.1s，4 倍余量）
+SHOT_SLOW_MS = 8000     # 超过此耗时 ⇒ 判为可疑慢帧，丢弃重抓。
+#                         两条通道的正常值都远低于它：raw ~1.3s、PNG 回落 ~3.5s
+#                         ⇒ 8000 对两者都是"纯保险"线，不用跟着通道调。
 SHOT_MAX_TRY = 2        # 最多抓几次（1 次正常 + 1 次重抓）
+# 抓帧通道（2026-09-21 新增）：
+#   "raw" = `exec-out screencap`（**不带 -p**）取 RGBA 原始缓冲，本地编码 PNG；
+#   "png" = 旧路径（`screencap -p`，设备端 PNG 压缩；失败还会回落 drv.py shotq）。
+# ⚠️ 为什么改 raw —— 瓶颈是**设备端 PNG 压缩**，不是链路、也不是传输量。
+#    同一静止画面实测（MIX3 2340×1080）：
+#      shell echo                   86 ms                    ← 链路本身不慢
+#      exec-out screencap -p      3468 / 3724 ms   2.93 MB   ← 2.3s 花在设备 CPU 编码
+#      exec-out screencap (raw)   1166 / 1278 ms   9.64 MB   ← 传 3 倍量反而快 3 倍
+#      shell screencap + pull     4515 + 714 ms              ← 更慢（多写一次文件）
+#    **等价性已验到像素级**：raw 帧与 PNG 帧的逐像素帧差 = **0.0**
+#    （同通道两次抓帧的噪声基线同样 0.0 ⇒ 不是"差异小"，是完全一致）。
+SHOT_CHANNEL = "raw"
 # 地图界面的「固定 UI 锚点」：这两条同时命中 ⇒ 必在地图界面（免整帧 OCR 判态）
 # 依据：icon_crossframe.py 实测二者都是多帧同坐标的固定 UI（家园 (2152,1029)、
 # 眠枭庇护所(地图UI) (188,187)），且只在地图界面存在。
@@ -104,8 +119,57 @@ def run(args, timeout=180):
     return p.returncode, out, err
 
 
+def _grab_raw(tag):
+    """raw 通道抓帧：`exec-out screencap`（**不带 -p**）取原始缓冲，本地存成 PNG。
+
+    返回帧路径；返回 None 表示这条通道这次不可用（调用方回落 PNG 通道）。
+
+    帧布局（Android screencap 原生输出，小端）：
+        16 字节头 = width, height, format, colorspace
+        之后 = width*height*4 字节 RGBA8888（format=1）
+
+    ⚠️ **长度必须精确等于 16+w*h*4**：不等就说明是半截或 CRLF 污染，宁可判失败走
+    回落，也不能把错位数据当帧 —— 那会让后面所有判据建在垃圾上（同"旧帧冒充新帧"的病根）。
+    Windows 下实测这条通道是二进制安全的（len 精确匹配、像素与 PNG 通道逐点全同），
+    但仍保留这条长度校验，因为它同时兜住"设备换分辨率""fmt 变更"两类变化。
+
+    ⚠️ 本地重新编码 PNG 是**刻意的**：判据侧（diff_two / 定位 / OCR）都按 *.png 读，
+    保持"抓帧产物就是 PNG"这条不变，等于**判据口径零改动**，只有取帧方式变了。
+    """
+    path = os.path.join(SHOTDIR, tag + ".png")
+    try:
+        p = subprocess.run([ADB, "-s", SERIAL, "exec-out", "screencap"],
+                           capture_output=True, timeout=SHOT_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    raw = p.stdout
+    if not raw or len(raw) < 16:
+        return None
+    try:
+        w, h, fmt, _cs = struct.unpack("<4I", raw[:16])
+    except struct.error:
+        return None
+    if fmt != 1 or w <= 0 or h <= 0 or len(raw) != 16 + w * h * 4:
+        return None
+    try:
+        import numpy as np
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        arr = np.frombuffer(raw[16:], dtype=np.uint8).reshape(h, w, 4)
+        Image.fromarray(arr, "RGBA").save(path)
+    except Exception:
+        return None
+    return path
+
+
 def shot(tag, rec):
     """抓一帧，返回帧绝对路径。顺带记录耗时（真机流畅度指标）。
+
+    取帧有两条通道（见 SHOT_CHANNEL）：默认 **raw**（快 ~2s/帧），失败回落
+    drv.py shotq（PNG 通道，内部还有 exec-out -p → shell+pull 两级兜底）。
+    无论走哪条，产物都是 `<tag>.png` ⇒ **下游判据完全不感知通道差异**。
 
     用 drv.py 的 shotq（只抓帧、不跑 judge）：一审 judge 要读图算三个指标，
     本轮巡检并不需要界面判断（而且 judge 对地图界面本来就误判成 WORLD）。
@@ -121,21 +185,29 @@ def shot(tag, rec):
     last_err = ""
     for attempt in range(1, SHOT_MAX_TRY + 1):
         t0 = time.time()
-        try:
-            rc, out, err = run([PY, DRV, "shotq", tag], timeout=SHOT_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            rc, out, err = -1, "", "抓帧子进程超时 >%ds" % SHOT_TIMEOUT
-        dt_ms = round((time.time() - t0) * 1000)
         cand = None
-        m = re.search(r"([A-Za-z]:[^\s]*%s\.png)" % re.escape(tag), out)
-        if m:
-            cand = m.group(1)
+        if SHOT_CHANNEL == "raw":
+            cand = _grab_raw(tag)
+            if cand is None:
+                # 记一笔回落次数：raw 通道若在某台设备上不适用，这个计数会立刻暴露
+                rec["shot_fallback"] = rec.get("shot_fallback", 0) + 1
+        if cand is None:
+            # 回落旧通道：drv.py shotq（内部还有 exec-out -p → shell+pull 两级兜底）
+            try:
+                rc, out, err = run([PY, DRV, "shotq", tag], timeout=SHOT_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                rc, out, err = -1, "", "抓帧子进程超时 >%ds" % SHOT_TIMEOUT
+            m = re.search(r"([A-Za-z]:[^\s]*%s\.png)" % re.escape(tag), out)
+            if m:
+                cand = m.group(1)
+            if cand is None or not os.path.exists(cand):
+                c2 = os.path.join(SHOTDIR, tag + ".png")
+                if os.path.exists(c2):
+                    cand = c2
+            if cand is None or not os.path.exists(cand):
+                last_err = "rc=%d out=%r err=%r" % (rc, out[:200], err[:200])
+        dt_ms = round((time.time() - t0) * 1000)
         if cand is None or not os.path.exists(cand):
-            c2 = os.path.join(SHOTDIR, tag + ".png")
-            if os.path.exists(c2):
-                cand = c2
-        if cand is None or not os.path.exists(cand):
-            last_err = "rc=%d out=%r err=%r" % (rc, out[:200], err[:200])
             rec.setdefault("shot_retry_ms", []).append(dt_ms)
             continue
         # ⚠️ 新鲜度校验（离线单测暴露的真 bug）：SHOTDIR/<tag>.png 是**同名复用**的，
@@ -377,7 +449,7 @@ def ocr_texts(frame, min_conf=0.30):
 
 
 def detect_state(frame, hits=None, ref=None):
-    """判界面态。返回 map / panel / marker_edit / world / unknown。
+    """判界面态。返回 map / panel / home_panel / marker_edit / world / unknown。
 
     为什么不用像素判据：drv.py 的 judge 在**地图界面**会误报成 WORLD
     （它只看右上亮像素，而地图界面右上同样是大片亮区，实测多次踩到）。
@@ -386,12 +458,28 @@ def detect_state(frame, hits=None, ref=None):
     判据来自 09-21 实测（同一设备同一分辨率，逐帧 OCR 对照）：
       map         含「精灵踪迹」或「卡洛西亚大陆」（地图界面固有元素）
       panel       含「风眠省」/「15/15」——点「眠枭庇护所(地图UI)」弹出的区域进度面板
+      home_panel  含「舒适度」/「当前居住精灵」/「当前种植植物」——家园信息浮层
       marker_edit 含「标记（点击修改名称）」——误入标记编辑态时的提示语
       world       含「触碰」——野外落地才有的交互按钮
+
+    ⚠️ **判据顺序 = 先"叠加层"后"底层"**（09-21 异常起点跑批踩到，很重要）：
+      「家园信息浮层」是**盖在地图上**的浮层，地图固有词（「卡洛西亚大陆」×2、
+      「精灵踪迹 11/14」）**依然在屏** ⇒ 靠 map 判据**根本分不开**。
+      实测对照（同一批帧逐词 OCR）：
+                      卡洛西亚大陆  精灵踪迹  舒适度  当前居住精灵  当前种植植物
+        干净地图          ✓ ×2        ✓ 11/15    ✗        ✗            ✗
+        家园浮层          ✓ ×2        ✓ 11/14    ✓        ✓            ✓
+      ⇒ 后果不是"判错一次"，而是**连锁假绿**：起点守卫判 map ⇒ 不救；
+        复位探测帧若落在浮层上 ⇒ 也判 map ⇒ **复位假成功**；而目标「家园」图标
+        正被浮层盖住 ⇒ 未在屏 ⇒ 未决。整套指标里只有「目标在屏」露马脚，
+        **成功率照样 100%**（未决不计入分母）。
+      ⇒ 修法：浮层/编辑态这类**叠加层判据必须排在 map 之前**（marker_edit、panel
+        本来就是这么排的，当时漏了家园浮层这一种）。
 
     ⚡ 两条**免 OCR 快路径**（整帧 OCR 实测 3.6s，是单轮最大的单项开销）：
       1) 传入 hits（本轮全库定位结果）且命中多个「固定 UI 锚点」⇒ 必是地图界面。
          定位本来就要跑，这一步等于零成本。
+         （家园浮层开着时「家园」图标被浮层盖住 ⇒ 锚点凑不齐 ⇒ 快路径天然不误触发。）
       2) 传入 ref（一张已确认是地图的参考帧）且与它逐像素接近 ⇒ 地图界面。
          复位最后一步"回到 map"正是这种情况，帧差 ≈0，不必再 OCR 一次。
     两条都不成立才落回 OCR 语义判态（宁可慢，不能误判）。
@@ -414,6 +502,10 @@ def detect_state(frame, hits=None, ref=None):
         return "marker_edit"
     if "风眠省" in joined or "15/15" in joined:
         return "panel"
+    # 叠加层判据必须在 map 之前（见 docstring）：这三个词是家园浮层独有的，
+    # 干净地图实测一个都不出现。
+    if "舒适度" in joined or "当前居住精灵" in joined or "当前种植植物" in joined:
+        return "home_panel"
     if "精灵踪迹" in joined or "卡洛西亚大陆" in joined:
         return "map"
     return "unknown"
@@ -463,7 +555,7 @@ def reset_to_map(rec, max_attempts=5, verbose=True, ref=None,
             return True, f, steps
         if st == "world":
             tap_px(NAV_X, NAV_Y, 1500)            # 开地图（单点，被吞再点）
-        else:                                      # panel / marker_edit / unknown
+        else:                                      # panel / home_panel / marker_edit / unknown
             tap_px(CLOSE_X, CLOSE_Y, 900)          # 只点一次，点完立刻重判
     rec["reset_attempts"] = max_attempts
     rec["reset_state_path"] = steps
@@ -553,7 +645,7 @@ def tap_once_verified(x, y, base, tag, rec, wait_ms=TAP_WAIT,
 
 
 def main():
-    global SHOT_SLOW_MS          # 允许命令行收紧"慢帧"阈值（仅为验证兜底逻辑）
+    global SHOT_SLOW_MS, SHOT_CHANNEL   # 允许命令行收紧"慢帧"阈值 / 切抓帧通道
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=10, help="跑多少轮")
     ap.add_argument("--out", default=".workbuddy/evidence/nrc/20260921-soak", help="证据目录")
@@ -566,6 +658,11 @@ def main():
                     help="单次抓帧超过此毫秒数即判为慢帧、丢弃重抓（默认 %d）。"
                          "调小可**强制触发重抓**，用来验证兜底逻辑在真机上的行为"
                          "（正常抓帧 ~2.1s，调成 500 会让每帧都重抓一次）" % SHOT_SLOW_MS)
+    ap.add_argument("--shot-channel", choices=("raw", "png"), default=SHOT_CHANNEL,
+                    help="抓帧通道（默认 %s）。raw = exec-out screencap 取原始缓冲、"
+                         "本地编码 PNG（实测快 ~2s/帧，因为瓶颈是设备端 PNG 压缩）；"
+                         "png = 旧路径。两者产物都是 <tag>.png，判据口径完全一致，"
+                         "留这个开关是为了 A/B 对照与快速回退。" % SHOT_CHANNEL)
     ap.add_argument("--targets", default="",
                     help="点击目标（逗号分隔的图标名）；默认全部轮换。"
                          "传单个名即退化为单目标模式。可选："
@@ -573,6 +670,7 @@ def main():
     a = ap.parse_args()
 
     SHOT_SLOW_MS = a.shot_slow_ms
+    SHOT_CHANNEL = a.shot_channel
 
     # 选目标：默认全部轮换（每轮一个，按序循环）
     if a.targets.strip():
@@ -812,6 +910,9 @@ def main():
     retry_ms = flat("shot_retry_ms")
     rec["summary"]["shot_slow_rounds"] = len([r for r in rs if r.get("shot_slow")])
     rec["summary"]["shot_retry_n"] = len(retry_ms)
+    # 抓帧通道与回落次数：raw 通道若在某台设备上不适用，这个计数会立刻暴露
+    rec["summary"]["shot_channel"] = SHOT_CHANNEL
+    rec["summary"]["shot_fallback_n"] = sum(r.get("shot_fallback", 0) for r in rs)
     if retry_ms:
         rec["summary"]["shot_retry_max_ms"] = max(retry_ms)
     for key, label in (("round_sec", "单轮"), ("tap_sec", "点击"), ("reset_sec", "复位")):
@@ -869,7 +970,9 @@ def main():
                      v["diff_avg"] if v["diff_avg"] is not None else "-",
                      v.get("expect") or "-"))
     print("  全库定位命中均值 : %s 条/轮" % s["locate_hits_avg"])
-    print("  平均抓帧        : %s ms（最慢 %s）" % (s.get("shot_ms_avg"), s.get("shot_ms_max")))
+    print("  平均抓帧        : %s ms（最慢 %s）· 通道 %s%s"
+          % (s.get("shot_ms_avg"), s.get("shot_ms_max"), s.get("shot_channel"),
+             ("（回落 %d 次）" % s["shot_fallback_n"]) if s.get("shot_fallback_n") else ""))
     if s.get("shot_retry_n"):
         print("  抓帧兜底        : %d 轮出现慢帧 / 丢弃重抓 %d 次（最慢被弃 %s ms）"
               % (s.get("shot_slow_rounds"), s.get("shot_retry_n"),
