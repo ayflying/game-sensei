@@ -32,7 +32,19 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-SHOTDIR = os.path.join(ROOT, ".workbuddy", "tmp", "screenshots", "nrc-20260918")
+# 帧集放**证据目录**，不放 tmp/screenshots（tmp 随时可能被清理 ⇒ 回归集就废了）。
+# 属本地资产、未入 git（.workbuddy/ 整目录被忽略）⇒ 换机器会缺帧并被标 MISSING。
+FRAMEDIR = os.path.join(ROOT, ".workbuddy", "evidence", "nrc", "regress-frames")
+# 旧位置（当年取证时抓的原始帧），仅作回退用
+LEGACY_DIR = os.path.join(ROOT, ".workbuddy", "tmp", "screenshots", "nrc-20260918")
+# 语义名 → 原始帧名（溯源用；归档时已从 g4_panel 这类**会骗人的名字**改成语义名）
+ORIGIN = {
+    "panel.png": "regress_post.png",
+    "map_clean.png": "regress_pre.png",
+    "home_panel.png": "g4_panel.png",
+    "world.png": "dw_world.png",
+    "marker_edit.png": "s_now5_panel.png",
+}
 
 
 def _load_soak():
@@ -43,23 +55,38 @@ def _load_soak():
     return mod
 
 
+def resolve(name):
+    """帧名 → 真实路径：先归档目录，再绝对路径/相对路径，最后按原始名回退到旧 tmp 目录。"""
+    p = os.path.join(FRAMEDIR, name)
+    if os.path.exists(p):
+        return p
+    if os.path.isabs(name) or os.path.exists(name):
+        return name
+    legacy = ORIGIN.get(name)
+    if legacy:
+        lp = os.path.join(LEGACY_DIR, legacy)
+        if os.path.exists(lp):
+            return lp
+    return p
+
+
 # ── 内置回归用例集 ──────────────────────────────────────────────────────────
 # expect 是"人看帧得出的真实态"。帧名沿用当年取证时的命名。
 # 说明：这些帧都在 .workbuddy/tmp/screenshots/nrc-20260918/（本地资产，不入 git）；
 #       缺帧会被标 MISSING 而不是直接报错 —— 换了机器也能看出"回归集不完整"。
 CASES = [
-    # ⚠️ 期望值必须**人看帧 + 看 OCR 全文**得出，不能按帧名猜：
-    #    下面 g4_panel 名字带 panel 实际是家园、regress_pre 更像"地图"。
+    # ⚠️ 帧名要用**语义名**：原始帧名 g4_panel、s_now5_panel 都带 panel 却是家园 / 标记编辑态
+    #    ⇒ 按名字猜态必错（第一版期望值就是这么错的）。溯源见 ORIGIN 表。
     # 区域进度面板：地图固有词与两个锚点图标**都在屏**（坑⑧ 的现场）
-    ("panel", "regress_post.png", "panel"),
+    ("panel", "panel.png", "panel"),
     # 干净地图：锚点齐 + 地图固有词（OCR 有「11/14」收集进度，但不是 panel 的「15/15」）
-    ("map", "regress_pre.png", "map"),
+    ("map", "map_clean.png", "map"),
     # 家园界面：锚点被浮层盖住 ⇒ 不齐（坑⑤ 的现场）
-    ("home_panel", "g4_panel.png", "home_panel"),
+    ("home_panel", "home_panel.png", "home_panel"),
     # 大世界：地图已关，「触碰」在屏（坑⑥ 的现场之一）
-    ("world", "dw_world.png", "world"),
+    ("world", "world.png", "world"),
     # 标记编辑态：OCR 把「点击修改名称」认成「点击修破名称」⇒ 长词判据漏判（坑⑨ 的现场）
-    ("marker_edit", "s_now5_panel.png", "marker_edit"),
+    ("marker_edit", "marker_edit.png", "marker_edit"),
 ]
 
 
@@ -82,7 +109,7 @@ def main():
 
     if args.list:
         for name, f, exp in CASES:
-            p = f if os.path.isabs(f) else os.path.join(SHOTDIR, f)
+            p = resolve(f)
             print("%-10s %-24s expect=%-10s %s" % (name, f, exp,
                   "OK" if os.path.exists(p) else "MISSING"))
         return 0
@@ -95,7 +122,7 @@ def main():
             print("--diagnose 后面要给帧名/路径")
             return 2
         for t in targets:
-            p = t if os.path.isabs(t) or os.path.exists(t) else os.path.join(SHOTDIR, t)
+            p = resolve(t)
             if not os.path.exists(p):
                 print("MISSING  %s" % t)
                 continue
@@ -111,7 +138,7 @@ def main():
     n_pass = n_fail = n_missing = 0
     rows = []
     for name, f, exp in CASES:
-        p = f if os.path.isabs(f) else os.path.join(SHOTDIR, f)
+        p = resolve(f)
         if not os.path.exists(p):
             n_missing += 1
             rows.append((name, f, exp, "MISSING", "-", "-", "-"))
@@ -134,7 +161,7 @@ def main():
     print("-" * 96)
     print("通过 %d / 失败 %d / 缺帧 %d" % (n_pass, n_fail, n_missing))
     if n_missing:
-        print("⚠️ 缺帧说明回归集不完整：帧在 .workbuddy/tmp/screenshots/ 下，属本地资产。")
+        print("⚠️ 缺帧说明回归集不完整：帧应在 %s（本地资产、未入 git）。" % FRAMEDIR)
     return 0 if n_fail == 0 else 1
 
 
