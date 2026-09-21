@@ -239,13 +239,18 @@ def shot(tag, rec):
     return path
 
 
-def locate(frame, rec, min_score=0.85):
-    """全库定位：返回 {名称: (分数, x, y)}。记录耗时与命中数。"""
+def locate(frame, rec, min_score=0.85, record=True):
+    """全库定位：返回 {名称: (分数, x, y)}。记录耗时与命中数。
+
+    `record=False` 专供**起点守卫的提前定位**：那次结果若被本轮复用，由调用方按
+    "复用"口径记账；若因复位作废，它的耗时就不该算进本轮（会虚增定位开销）。
+    """
     t0 = time.time()
     rc, out, err = run([PY, ICON_MATCH, "--find-all", "--shot", frame,
                         "--at", "--min-score", str(min_score)])
     dt = time.time() - t0
-    rec.setdefault("locate_ms", []).append(round(dt * 1000))
+    if record:
+        rec.setdefault("locate_ms", []).append(round(dt * 1000))
     hits = {}
     for line in out.splitlines():
         line = line.strip()
@@ -550,6 +555,19 @@ def reset_to_map(rec, max_attempts=5, verbose=True, ref=None,
             st = detect_state(f, ref=ref)
         steps.append(st)
         if st == "map":
+            # ⚠️ 没有 ref 快路径时，"判 map"必须**再确认一帧**（2026-09-21 午踩到）。
+            # 起点守卫那次调用**不传 ref**（起点界面未知，没有可信的地图参考帧），
+            # 于是"是否回到地图"只能靠 OCR。而**地图正在关闭的过渡帧**里地图元素还在
+            # （含「卡洛西亚大陆」「精灵踪迹」），只是图标已经消失 ⇒ OCR 照判 map
+            # ⇒ **复位假成功**：那一轮定位只命中 7 条（正常 20~21 条）、且不含两个固定 UI
+            # 锚点 ⇒ 目标"未在屏"⇒ 未决，而成功率照样显示 100%。
+            # 过渡态隔 0.6s 必然继续变化 ⇒ "再抓一帧仍判 map"才算数。
+            if ref is None:
+                f2 = shot("%s_confirm%02d" % (tag_prefix, i), rec)
+                if detect_state(f2) != "map":
+                    steps[-1] = "map_unstable"      # 留痕：这一步曾误判成 map
+                    continue
+                f = f2
             rec["reset_attempts"] = i
             rec["reset_state_path"] = steps
             return True, f, steps
@@ -712,17 +730,28 @@ def main():
         try:
             # ---- 0) 起点守卫：不在地图界面就先复位，别让上一轮的残留状态污染本轮统计 ----
             base = shot("soak%02d_base" % i, r)
-            st0 = detect_state(base, ref=prev_map)
+            # 判态前先定位：定位结果是判态的**像素级证据**（两个固定 UI 锚点齐 ⇒ 必在地图），
+            # 比 OCR 词可靠 —— 地图的词在大世界、家园浮层、以及**地图正在关闭的过渡帧**上
+            # 都可能在屏（2026-09-21 午连踩两次）。定位本来第 2 步就要做，
+            # 提前到判态之前**零额外成本**，而且能与 base 的 OCR 真正并行
+            # （判态用的就是这份 OCR 结果，缓存命中 ⇒ 等于把判态那段识别挪进并行窗口）。
+            warm = threading.Thread(target=lambda: ocr_lines_many([base]), daemon=True)
+            warm.start()
+            hits0, loc_dt0 = locate(base, r, a.min_score, record=False)
+            warm.join(timeout=120)
+            st0 = detect_state(base, hits=hits0, ref=prev_map)
             r["start_state"] = st0
             # 原始起点态单独记：下面复位成功后会覆盖 start_state，
             # 不单独留一份就看不出"这一轮是被守卫救回来的"。
             r["start_state_raw"] = st0
             if st0 != "map":
-                ok0, base, path0 = reset_to_map(r, verbose=a.verbose,
+                # ref=prev_map：起点异常时若复位回到"上一轮那同一张地图"，帧差 ≈0 免 OCR。
+                ok0, base, path0 = reset_to_map(r, verbose=a.verbose, ref=prev_map,
                                                 tag_prefix="soak%02d_start" % i)
                 r["start_reset_path"] = path0
                 st0 = detect_state(base)
                 r["start_state"] = st0
+                hits0 = None            # base 已换 ⇒ 起点那次定位作废
                 if not ok0:
                     r["verdict"] = "UNDECIDED_NOT_ON_MAP"
                     print("  轮 %2d  起点不在地图界面（%s）且复位失败 ⇒ 未决（不计入成功率）" % (i, st0))
@@ -733,15 +762,21 @@ def main():
             # ---- 1) 基准帧就绪 ----
             r["base"] = os.path.basename(base)
 
-            # ---- 2) 全库定位（与 base 的 OCR 并行）----
-            # 两者互不依赖：定位只看像素、OCR 只看文字。串行做等于白等一次
-            # 识别（实测 1.9s/帧）。这个线程只负责「预热」——结果会落进
-            # _OCR_CACHE，后面 ocr_lines_many([base, after]) 直接命中缓存，
-            # 不会重复识别。所以即使 join 超时也不影响正确性，只是白跑。
-            warm = threading.Thread(target=lambda: ocr_lines_many([base]), daemon=True)
-            warm.start()
-            hits, loc_dt = locate(base, r, a.min_score)
-            warm.join(timeout=120)
+            # ---- 2) 全库定位 ----
+            # 起点就在地图 ⇒ 直接复用守卫前那次定位（零额外成本）；
+            # 复位过 ⇒ base 换了，必须重定位（此时再补一次 OCR 预热）。
+            if hits0 is not None:
+                hits, loc_dt = hits0, loc_dt0
+                # ⚠️ 记进**轮记录 r**，不是全局 rec —— locate() 的第二个形参名叫 rec，
+                # 实际接的是轮记录（r），汇总按轮遍历取 locate_ms。写错对象会让
+                # "平均全库定位"变成 None（2026-09-21 午踩到，12 轮白跑才发现）。
+                r.setdefault("locate_ms", []).append(round(loc_dt0 * 1000))
+                r["locate_reused"] = True
+            else:
+                warm = threading.Thread(target=lambda: ocr_lines_many([base]), daemon=True)
+                warm.start()
+                hits, loc_dt = locate(base, r, a.min_score)
+                warm.join(timeout=120)
             r["locate_hits"] = len(hits)
             r["locate_sec"] = round(loc_dt, 2)
             r["hits"] = {k: [round(v[0], 3), v[1], v[2]] for k, v in sorted(hits.items())}
