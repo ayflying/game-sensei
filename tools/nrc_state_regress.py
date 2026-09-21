@@ -109,6 +109,10 @@ def main():
     ap.add_argument("--diagnose", nargs="*", default=None,
                     help="只诊断这些帧（路径或帧名），不判对错")
     ap.add_argument("--list", action="store_true", help="列内置用例集")
+    ap.add_argument("--scan", default=None,
+                    help="批量扫一个目录：挑出 A/B 口径**不一致**的帧（= 可疑帧候选，"
+                         "如 transition_redraw 那类 OCR 判 map 但锚点不齐的帧）")
+    ap.add_argument("--limit", type=int, default=0, help="--scan 时最多扫几帧（0=不限）")
     args = ap.parse_args()
 
     if args.list:
@@ -119,6 +123,34 @@ def main():
         return 0
 
     mod = _load_soak()
+
+    if args.scan:
+        # 为什么要有这个模式：transition_redraw 那类"OCR 判 map、锚点却判 unknown"的帧
+        # 是**人工偶然**发现的。A/B 口径不一致正是这类帧的指纹 ⇒ 批量扫就能自动找出来。
+        import glob as _glob
+        files = sorted(_glob.glob(os.path.join(args.scan, "*.png")))
+        if args.limit:
+            files = files[:args.limit]
+        if not files:
+            print("目录里没有 PNG：%s" % args.scan)
+            return 2
+        print("扫描 %d 帧（每帧约 7s：定位 + OCR）...\n" % len(files))
+        sus = []
+        for i, p in enumerate(files, 1):
+            a, b, n, ok, keys, score = diag(mod, p)
+            flag = ""
+            if a != b:
+                flag = "  ← 口径不一致"
+                sus.append((os.path.basename(p), a, b, n, ok))
+            print("[%3d/%d] %-32s A=%-11s B=%-11s 命中%-3d %s%s" %
+                  (i, len(files), os.path.basename(p), a, b, n,
+                   "锚点齐" if ok else "锚点不齐", flag))
+        print("-" * 72)
+        print("可疑帧（A/B 不一致）共 %d 个：" % len(sus))
+        for name, a, b, n, ok in sus:
+            print("  %-34s A=%-10s B=%-10s 命中%d 锚点%s" %
+                  (name, a, b, n, "齐" if ok else "不齐"))
+        return 0
 
     if args.diagnose is not None:
         targets = args.diagnose
