@@ -72,7 +72,11 @@ SERIAL = os.environ.get("NRC_SERIAL", "ecbff3a5")
 #          它的反应只有 2.04，补点门槛一过就把标签收回去，最终帧差 0.00、判成"无反应"。
 TARGETS = [
     {"name": "眠枭庇护所(地图UI)", "exit": "close", "min_diff": 8.0, "expect": "区域进度面板"},
-    {"name": "皇家招待所", "exit": "close", "min_diff": 8.0, "expect": "标记编辑态"},
+    # ⚠️ 原标「标记编辑态」，但 20 轮实测反应态**稳定判 panel**（帧差 30.98，5/5 一致）
+    #    ⇒ 已按实测更正（expect 只用于展示，不参与判据）。
+    #    点它后**更早**抓帧（过渡中）会得到 unknown —— 那一帧已收进离线回归集
+    #    （regress-frames/transition_redraw.png），可复现。
+    {"name": "皇家招待所", "exit": "close", "min_diff": 8.0, "expect": "区域面板"},
     {"name": "家园", "exit": "close", "min_diff": 8.0, "expect": "家园信息浮层"},
     {"name": "皮卡月刊", "exit": "retap", "min_diff": 1.5, "verify": False,
      "expect": "名字标签"},

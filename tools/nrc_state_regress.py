@@ -87,6 +87,10 @@ CASES = [
     ("world", "world.png", "world"),
     # 标记编辑态：OCR 把「点击修改名称」认成「点击修破名称」⇒ 长词判据漏判（坑⑨ 的现场）
     ("marker_edit", "marker_edit.png", "marker_edit"),
+    # 过渡/重绘帧（点「皇家招待所」后立刻抓，**可复现**）：OCR 见「卡洛西亚大陆 / 精灵踪迹」
+    # 会判 map，但它**缺「家园」锚点、与干净地图帧差 28.3** ⇒ 新口径必须判 unknown。
+    # 这条专门守住「锚点不齐不许判 map」这条底线（坑⑥ 过渡帧 / 坑⑧ 面板都是踩它）。
+    ("transition", "transition_redraw.png", "unknown"),
 ]
 
 
