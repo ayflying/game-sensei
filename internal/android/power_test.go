@@ -241,3 +241,60 @@ func TestPowerState_String(t *testing.T) {
 		}
 	}
 }
+
+// TestParseBatteryExempt 覆盖 Doze 白名单的匹配：必须逐段精确比对。
+//
+// 关键是**前缀包含**这条反例：com.tencent 与 com.tencent.nrc 同时在列表里时，
+// 子串匹配会把后者误判成前者已豁免，从而漏掉真正要豁免的包。
+func TestParseBatteryExempt(t *testing.T) {
+	out := `system-excidle,com.android.vending,10171
+user,com.tencent.nrc,10195
+user,com.tencent,10100
+`
+	cases := []struct {
+		pkg  string
+		want bool
+	}{
+		{"com.tencent.nrc", true},
+		{"com.tencent", true},
+		{"com.tencent.nr", false}, // 前缀但不是完整段
+		{"tencent.nrc", false},    // 子串但不是完整段
+		{"com.other", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := ParseBatteryExempt(out, c.pkg); got != c.want {
+			t.Errorf("ParseBatteryExempt(%q) = %v，期望 %v", c.pkg, got, c.want)
+		}
+	}
+}
+
+// TestParseBatteryExemptList 抽出包名：去重保序，且不把标记段当包名。
+func TestParseBatteryExemptList(t *testing.T) {
+	out := `system-excidle,com.android.vending,10171
+user,com.tencent.nrc,10195
+user,com.tencent.nrc,10195
+system-excidle,com.android.shell,2000
+garbage-without-comma
+`
+	got := ParseBatteryExemptList(out)
+	want := []string{"com.android.vending", "com.tencent.nrc", "com.android.shell"}
+	if len(got) != len(want) {
+		t.Fatalf("ParseBatteryExemptList = %v，期望 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 项 = %q，期望 %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestParseBatteryExempt_空输出不 panic 覆盖设备无白名单/命令失败时的边界。
+func TestParseBatteryExempt_空输出不panic(t *testing.T) {
+	if ParseBatteryExempt("", "com.a.b") {
+		t.Error("空输出不应判定为已豁免")
+	}
+	if got := ParseBatteryExemptList(""); len(got) != 0 {
+		t.Errorf("空输出应得到空列表，实际 %v", got)
+	}
+}

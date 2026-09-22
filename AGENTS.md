@@ -157,13 +157,20 @@
   | 界面文字识别（OCR） | `cmd/ocr` | `internal/ocr`（常驻子进程，`server.py` 内嵌） |
   | 画面 → 纯文本（亮度/色相/面板图、**颜色掩膜找色块与质心**） | `cmd/see` | `cmd/see/main.go` |
   | 真机截图 / 压缩 / 点位 / 帧差 Δ / A-B 对照 | `cmd/shot` | `internal/android` + `internal/vision` |
-  | **真机省电与休眠**（亮度 / 熄屏超时 / 允许休眠 / 唤醒解锁 / 电量） | `cmd/power`（`-status` / `-save` / `-wake` / `-sleep`） | `internal/android/power.go` |
+  | **真机省电与休眠**（亮度 / 熄屏超时 / 允许休眠 / 唤醒解锁 / Doze 白名单 / 电量） | `cmd/power`（`-status` / `-save` / `-wake` / `-sleep` / `-exempt`） | `internal/android/power.go` |
   | **游戏经营循环**（「地下城里开商店」制作-收取 / 市场收单-挂单：全 OCR 当帧定位，零写死坐标、零钻石支出） | `cmd/forge`（`-rounds` 制作线、`-market` 卖货线） | `cmd/forge/main.go` |
   | 画面缩放与区域裁剪 | — | `internal/vision`（`Downscale` / `Zoom` / `ParseRect` / `Crop` / `FrameDiff`） |
   | 坐标标定 | `tools/grid_overlay.py` | — |
 
   2026-09-20 的教训：一批「找绿按钮 / 画 ASCII 图 / 算帧差」的临时脚本其实
   `see` 与 `shot -delta` 早就覆盖了，写之前没查这张表 —— **先查表，再动手**。
+
+  **2026-09-22 的教训：改了 `internal/android` 必须重编所有依赖它的 `cmd`。**
+  自动唤醒加进 `Screenshot()` 后，`.workbuddy/bin/shot.exe`（编译于改动之前）
+  抓帧仍返回全黑，一度误判成「唤醒逻辑失效」。源码变了**旧二进制不会自动更新**。
+  受影响：`shot` / `hunt` / `adb`（产物名 `gadb`）/ `forge` / `helper` 等一切抓帧命令。
+  判据看抓帧结果而非「重编过」：正常帧 2340x1080 约 2 MB，熄屏黑帧 1080x2340 约 14 KB。
+  细节见 `docs/action-layer.md` 息屏章节。
 
   `.workbuddy/tmp/` 下的脚本只允许是**一次性的探测代码**，用完即删；凡是第二次要用的，
   说明它该被正式化。

@@ -540,3 +540,102 @@ func (d *Device) ensureAwakeThrottled() {
 	// 热路径每帧都查 keyguard 会明显拖慢实时回路。
 	_, _ = d.wakeIfAsleep()
 }
+
+// Doze 白名单（电池优化豁免）。
+//
+// 为什么需要它：安卓在熄屏后进入 Doze 并限制后台网络。实测（2026-09-22）
+// 熄屏 180 秒即让在线游戏掉线（弹「当前网络状态不稳定」→ 点返回触发游戏重载），
+// 而亮屏同样 180 秒完全正常（对照实验，唯一变量是熄屏与否）。把游戏加入
+// Doze 白名单后，熄屏期间网络不再被限制，「熄屏省电」与「不断线」才可能兼得。
+//
+// 边界：白名单**只免 Doze 的网络限制**，既不阻止屏幕熄灭，也不改变
+// stay_on_while_plugged_in；设备仍会按时熄屏，仍由抓帧侧自动唤醒。
+
+// batteryExemptListCmd 列出 Doze 白名单。每行形如 `user,<包名>,<uid>`。
+const batteryExemptListCmd = "dumpsys deviceidle whitelist"
+
+// ParseBatteryExempt 判断包名是否出现在白名单输出里（纯函数，便于单测）。
+//
+// 按逗号分段后**逐段精确比对**，不用子串包含：包名存在前缀包含关系时
+// （com.a 与 com.a.b），子串匹配会把后者误判成前者。
+func ParseBatteryExempt(out, pkg string) bool {
+	if pkg == "" {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		for _, field := range strings.Split(strings.TrimSpace(line), ",") {
+			if strings.TrimSpace(field) == pkg {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ParseBatteryExemptList 从白名单输出里抽出包名（去重、保序）。
+//
+// 只收「含点号」的第二段：既过滤表头与空行，也避免把 `system-excidle`
+// 这类标记当成包名。
+func ParseBatteryExemptList(out string) []string {
+	var pkgs []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(strings.TrimSpace(line), ",")
+		if len(fields) < 2 {
+			continue
+		}
+		pkg := strings.TrimSpace(fields[1])
+		if pkg == "" || !strings.Contains(pkg, ".") || seen[pkg] {
+			continue
+		}
+		seen[pkg] = true
+		pkgs = append(pkgs, pkg)
+	}
+	return pkgs
+}
+
+// BatteryExempt 查询某包是否已在 Doze 白名单。
+func (d *Device) BatteryExempt(pkg string) (bool, error) {
+	out, err := d.Shell(batteryExemptListCmd)
+	if err != nil {
+		return false, err
+	}
+	return ParseBatteryExempt(out, pkg), nil
+}
+
+// SetBatteryExempt 把包加入（exempt=true）或移出 Doze 白名单。
+//
+// 必须读回校验：`dumpsys deviceidle whitelist +pkg` 在部分 ROM 上会打印
+// 「Added: ...」却因权限不足没有真正落库，只有读回才是证据。
+func (d *Device) SetBatteryExempt(pkg string, exempt bool) error {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return fmt.Errorf("android: 包名不能为空")
+	}
+	sign := "+"
+	verb := "加入"
+	if !exempt {
+		sign = "-"
+		verb = "移出"
+	}
+	if _, err := d.Shell(batteryExemptListCmd + " " + sign + pkg); err != nil {
+		return err
+	}
+	got, err := d.BatteryExempt(pkg)
+	if err != nil {
+		return err
+	}
+	if got != exempt {
+		return fmt.Errorf("android: %s Doze 白名单失败（读回仍为 %v），该 ROM 可能限制此操作", verb, got)
+	}
+	return nil
+}
+
+// BatteryExemptList 返回白名单内的全部包名。
+func (d *Device) BatteryExemptList() ([]string, error) {
+	out, err := d.Shell(batteryExemptListCmd)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBatteryExemptList(out), nil
+}

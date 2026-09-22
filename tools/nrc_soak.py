@@ -173,6 +173,64 @@ def _grab_raw(tag):
     return path
 
 
+# ── 黑帧兜底（2026-09-22）──────────────────────────────────────────────
+# 熄屏时 `screencap` 得到的是纯黑图，**不报错**，只会让所有基于画面的判据
+# 静默失效（「判不出来」而不是「报失败」），属于最难定位的一类故障。
+# Go 侧 `internal/android` 的 `Screenshot` 已内置抓帧前唤醒；这条 Python 抓帧
+# 路径不经过 Go，所以在这里用「抓到黑帧 → 唤醒 → 重抓」兜底。
+#
+# 只在异常时触发，正常跑批零额外开销：先用**文件大小**快筛（全黑帧 PNG 实测
+# 约 14 KB，正常大世界帧约 1.9 MB），可疑才解码算均值。
+BLACK_FRAME_BYTES = 60_000
+BLACK_FRAME_MEAN = 12.0  # 与 Go 侧 cmd/helper/demo.go 的 blackFrameMean 对齐
+
+_wake_lock = threading.Lock()
+_last_wake_at = [0.0]
+
+
+def _frame_is_black(path):
+    """判断一帧是否基本全黑（熄屏产物）。先按文件大小快筛，可疑才解码。"""
+    try:
+        if os.path.getsize(path) >= BLACK_FRAME_BYTES:
+            return False
+    except OSError:
+        return False
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            g = im.convert("L").resize((64, 36))
+        data = list(g.getdata())
+        return (sum(data) / len(data)) < BLACK_FRAME_MEAN
+    except Exception:
+        return False
+
+
+def _wake_device():
+    """熄屏则唤醒并解除锁屏，返回本次是否真的发过唤醒。
+
+    与 Go 侧 `internal/android/power.go` 的 `wakeIfAsleep` 对齐，三条实测约束：
+      ① 用 `KEYCODE_WAKEUP` 而非 `KEYCODE_POWER`——前者在已亮屏时是空操作，
+         后者会把亮着的屏幕按灭；
+      ② 唤醒后**必须** `wm dismiss-keyguard`：这台设备虽没设密码，唤醒后仍停在
+         滑动锁屏上，此时触摸与按键全部落到锁屏、表现同样是「操作无效」；
+      ③ 两者之间要等约 1.2 秒——熄屏时立刻发 dismiss 会被系统忽略（keyguard
+         还没随屏幕起来），实测静默失败。
+    5 秒节流：连续黑帧时不必每帧都唤醒一次。
+    """
+    with _wake_lock:
+        now = time.time()
+        if now - _last_wake_at[0] < 5.0:
+            return False
+        _last_wake_at[0] = now
+    try:
+        run([ADB, "-s", SERIAL, "shell", "input keyevent KEYCODE_WAKEUP"], timeout=15)
+        time.sleep(1.2)
+        run([ADB, "-s", SERIAL, "shell", "wm dismiss-keyguard"], timeout=15)
+    except Exception:
+        return False
+    return True
+
+
 def shot(tag, rec):
     """抓一帧，返回帧绝对路径。顺带记录耗时（真机流畅度指标）。
 
@@ -239,6 +297,15 @@ def shot(tag, rec):
             except OSError:
                 pass
             continue
+        # 黑帧兜底：熄屏产物会让所有画面判据静默失效，先唤醒再重抓一次。
+        if _frame_is_black(cand):
+            rec.setdefault("shot_retry_ms", []).append(dt_ms)
+            if _wake_device() and attempt < SHOT_MAX_TRY:
+                rec["shot_wake"] = rec.get("shot_wake", 0) + 1
+                continue
+            # 唤醒失败或重试已用尽：接受这一帧但**记账**，不静默丢弃——
+            # 丢弃会让抓帧环节表现为「永远失败」，反而更难定位。
+            rec["shot_black"] = rec.get("shot_black", 0) + 1
         path = cand
         rec.setdefault("shot_ms", []).append(dt_ms)
         rec["shot_tries"] = rec.get("shot_tries", 0) + attempt

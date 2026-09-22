@@ -14,10 +14,16 @@
 //	gpower -serial ecbff3a5 -wake                    # 熄屏则唤醒（亮屏时是空操作）
 //	gpower -serial ecbff3a5 -sleep                   # 立即熄屏（验证自动唤醒链路用）
 //	gpower -serial ecbff3a5 -stayon 7                # 恢复插电永不休眠
+//	gpower -serial ecbff3a5 -exempt com.tencent.nrc  # 加入 Doze 白名单（熄屏不掉线）
+//	gpower -serial ecbff3a5 -exempt-list             # 列出 Doze 白名单
 //
 // -brightness 接受绝对值（如 100）或百分比（如 5%）。**推荐百分比**：
 // 亮度值域因 ROM 而异（Android 标准 0~255，MIX 3 的 MIUI 实测 10~2047），
 // 同一个绝对值在两套值域里含义完全不同。
+//
+// -exempt 与 -save 搭配用才完整：-save 允许设备熄屏省电，但熄屏会进 Doze
+// 并限制后台网络，实测 180 秒即让在线游戏掉线重载；把游戏加入白名单后
+// 熄屏期间网络不再被限制，「省电」与「不断线」才能兼得。
 //
 // 不带任何动作参数时等价于 -status。
 package main
@@ -61,6 +67,10 @@ func main() {
 		brightSpec = flag.String("brightness", "", "亮度：绝对值（100）或百分比（5%）；空=不改")
 		timeout    = flag.Duration("timeout", 0, "设置熄屏超时（0=不改）")
 		stayon     = flag.Int("stayon", -1, "设置插电保持唤醒位掩码 0~7（-1=不改）")
+
+		exemptPkg   = flag.String("exempt", "", "把该包加入 Doze 白名单（熄屏不掉线）")
+		unexemptPkg = flag.String("unexempt", "", "把该包移出 Doze 白名单")
+		exemptList  = flag.Bool("exempt-list", false, "列出 Doze 白名单（电池优化豁免）")
 	)
 	flag.Parse()
 
@@ -82,13 +92,13 @@ func main() {
 
 	// 互斥的动作：一次只做一个，避免「既唤醒又熄屏」这类自相矛盾。
 	exclusive := 0
-	for _, on := range []bool{*save, *wake, *sleep} {
+	for _, on := range []bool{*save, *wake, *sleep, *exemptList, *exemptPkg != "", *unexemptPkg != ""} {
 		if on {
 			exclusive++
 		}
 	}
 	if exclusive > 1 {
-		fmt.Fprintln(os.Stderr, "错误：-save / -wake / -sleep 一次只能用其中一个")
+		fmt.Fprintln(os.Stderr, "错误：-save / -wake / -sleep / -exempt / -unexempt / -exempt-list 一次只能用其中一个")
 		os.Exit(2)
 	}
 
@@ -99,6 +109,32 @@ func main() {
 	}
 
 	switch {
+	case *exemptList:
+		pkgs, err := d.BatteryExemptList()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "错误: 读取 Doze 白名单失败:", err)
+			os.Exit(1)
+		}
+		if len(pkgs) == 0 {
+			fmt.Println("Doze 白名单为空")
+			return
+		}
+		fmt.Printf("Doze 白名单 %d 个:\n", len(pkgs))
+		for _, p := range pkgs {
+			fmt.Println("  " + p)
+		}
+	case *exemptPkg != "":
+		if err := d.SetBatteryExempt(*exemptPkg, true); err != nil {
+			fmt.Fprintln(os.Stderr, "错误:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("已加入 Doze 白名单：%s（熄屏后网络不再被限制，不会再因 Doze 掉线）\n", *exemptPkg)
+	case *unexemptPkg != "":
+		if err := d.SetBatteryExempt(*unexemptPkg, false); err != nil {
+			fmt.Fprintln(os.Stderr, "错误:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("已移出 Doze 白名单：%s\n", *unexemptPkg)
 	case *save:
 		opt := android.DefaultPowerSaving()
 		if brightGiven {

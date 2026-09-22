@@ -275,15 +275,58 @@ adb shell settings put global stay_on_while_plugged_in 7   # 充电时保持常�
    `sleep 0.5` 间隔实测**静默失败**（画面仍停在锁屏）——熄屏时 keyguard 还没随屏幕
    起来，dismiss 被忽略。改成宿主侧等待后稳定生效。
 
-#### ⚠️ 主动熄屏的代价：在线游戏会掉线
+#### ⚠️ 熄屏会掐断在线游戏，用 Doze 白名单救回来
 
 熄屏省电虽有效，但**长时间熄屏会掐断在线游戏**。实测熄屏 3 分钟后抓帧唤醒：
 进程存活、画面正常，但弹出 `当前网络状态不稳定，请重试`，点「返回」后游戏
 **回退到冷启动开屏页**（`M世界` / `UNREAL` logo / 防沉迷提示），重新加载约需 40 秒
-才回到大世界。Android 的 Doze 在熄屏后限制后台网络，心跳因此断开。
+才回到大世界。原因是 Android 的 Doze 在熄屏后限制后台网络，心跳因此断开。
 
-⇒ **跑批间隙不要长时间主动熄屏**；省电主力是**降亮度**（5% 档实测生效），
-熄屏只适合游戏退出后的闲置期。
+**解法：把游戏加入 Doze 白名单（电池优化豁免）**：
+
+```bash
+gpower -serial ecbff3a5 -exempt com.tencent.nrc   # 加入白名单
+gpower -serial ecbff3a5 -exempt-list              # 查看当前白名单
+```
+
+白名单**只免 Doze 的网络限制**，不阻止屏幕熄灭，也不改变 `stay_on`。三组对照
+（同设备、同游戏、同网络、同时长 180 秒，唯一变量见左列）：
+
+| 条件 | 熄屏 180 秒后抓帧唤醒的结果 |
+|---|---|
+| 未豁免 | 弹「当前网络状态不稳定」→ 点返回触发游戏重载（**掉线**） |
+| 已豁免 | 画面正常、「前往魔法师之家 770米」、无弹窗（**不掉线**） |
+| 亮屏（对照） | 无弹窗、画面稳定 |
+
+⇒ 推荐的省电组合是 **`gpower -save` + `gpower -exempt <包名>`**：亮度压到 5%、
+允许按时熄屏、熄屏期间游戏不掉线、抓帧时自动唤醒并解锁。
+
+#### ⚠️ 改 `internal/android` 后必须重编**所有**依赖它的 `cmd`
+
+2026-09-22 踩到：自动唤醒加在 `Screenshot()` 里之后，用 `.workbuddy/bin/shot.exe`
+抓帧仍然拿到**全黑帧**，一度以为唤醒逻辑失效。真实原因是那个 `shot.exe` 编译于
+加唤醒**之前**（21 日 16:28），而 `screen.go` 是次日 10:42 才改的 —— **旧二进制
+不会因为源码变了就自己更新**。重编后同一场景立刻正常。
+
+受影响的是所有会抓帧的 `cmd`：`shot` / `hunt` / `adb`（`gadb`）/ `forge` / `helper`。
+改了 `internal/android` 就一起重编：
+
+```bash
+for c in shot hunt adb see ocr vlm forge img; do
+  out=$([ "$c" = adb ] && echo gadb || echo $c)
+  go build -o .workbuddy/bin/$out.exe ./cmd/$c
+done
+```
+
+判据不是「重编过」，而是**看抓帧结果**：正常帧 2340x1080、约 2 MB；
+熄屏黑帧是 1080x2340 竖屏、约 14 KB。尺寸方向反过来 + 体积差两个数量级，
+一眼可辨。
+
+**Python 抓帧路径另有兜底**（`tools/nrc_soak.py`）：这条路径不经过 Go，所以
+`shot()` 里加了「抓到黑帧 → `_wake_device()` 唤醒解锁 → 重抓一次」，先用
+文件大小（`BLACK_FRAME_BYTES = 60000`）零开销快筛，可疑才解码算均值
+（`BLACK_FRAME_MEAN = 12.0`，与 `cmd/helper/demo.go` 对齐）。唤醒失败或重试
+用尽时接受该帧但记 `shot_black` 计数，不静默丢弃。
 
 **回路侧**另有兜底（`cmd/helper/demo.go`）：黑帧均值 `blackFrameMean=12.0`，
 发现黑帧就发一次 `KEY wakeup` 并等 2 秒重取；仍然黑则跳过本步（不落示范样本），
