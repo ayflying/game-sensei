@@ -102,7 +102,7 @@ Style Tips` → 选卡），不在本线范围。**下一款 `-plan` 游戏优�
 # 第二批：新档（12 步 / 19 按钮）远程 10 局 — 2026-09-15
 
 > 对象：`internal/game/profiles/sparkle.json`（**12 步 / 19 按钮**，终点=结算页）
-> 方式：**217 主机 MuMu 模拟器**（`adb connect 192.168.50.217:16384`，900×1600），起点复位交 `restore.py`
+> 方式：**远程主机 MuMu 模拟器**（`adb connect <host:port>`，900×1600），起点复位交 `restore.py`
 > 跑批脚本：`.workbuddy/sparkle/remote/batch_remote.sh`
 > 离线复核：`.workbuddy/sparkle/remote/check_verdict_consistency.py`（可重算任一批次，**不必重跑设备**）
 

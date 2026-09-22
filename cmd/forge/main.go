@@ -52,7 +52,7 @@ const maxCollectTaps = 6
 func main() {
 	var (
 		adbPath = flag.String("adb", "", "adb 可执行文件路径；空则自动探测。⚠️ 不要指向 .workbuddy/bin/gadb.exe——它是项目自封装的精简 adb，只认 -serial，不接受标准的 -P/-s，会在 start-server 处直接失败")
-		serial  = flag.String("serial", "192.168.50.217:16384", "设备序列号")
+		serial  = flag.String("serial", "", "设备序列号；host:port 形式会自动 connect，空则自动发现")
 		port    = flag.Int("port", 5038, "adb server 端口（本机多个 adb 共存时必须独立）")
 		item    = flag.String("item", "合身外套", "要制作的物品名（制作页卡片上的文字）。默认取合身外套是因为它只需基础布料：加强木盾要「零件」，零件耗尽后点它只会弹「缺少必需品」框，白跑一轮")
 		rounds  = flag.Int("rounds", 1, "制作轮数")

@@ -1,5 +1,5 @@
 // Command adb（编译产物建议命名 gadb，避免与 SDK 的 adb.exe 混淆）是安卓设备
-// 的正式命令行操控入口，覆盖原临时脚本 adb217.py 的全部能力。
+// 的正式命令行操控入口，覆盖原临时 adb 脚本的全部能力。
 //
 // 为什么必须是正式命令而不是 py 脚本：AGENTS.md 的硬约束——常用能力落正式
 // Go 包与 cmd 命令。本命令把两条排障结论直接固化进链路，调用方不用再记：
@@ -13,8 +13,8 @@
 //
 // 用法（坐标一律像素，与实测笔记同一口径；-P 与 -serial 是全局参数）：
 //
-//	gadb -P 5038 -serial 192.168.50.217:16384 connect          # 自包含连接自检
-//	gadb -P 5038 -serial 192.168.50.217:16384 tap 495 645      # 像素坐标点击
+//	gadb -P 5038 -serial <host:port> connect                    # 自包含连接自检
+//	gadb -P 5038 -serial <host:port> tap 495 645                # 像素坐标点击
 //	gadb -P 5038 -serial ... swipe 100 200 300 400 300         # 滑动（时长 ms 可省）
 //	gadb -P 5038 -serial ... key back                          # back/home/enter...
 //	gadb -P 5038 -serial ... shell wm size                     # 设备端 shell

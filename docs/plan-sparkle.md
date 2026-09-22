@@ -204,17 +204,19 @@ step <步名>: none —— 条件满足（1.483s）
 
 ---
 
-## 12.9 远程 ADB（217 上的安卓模拟器）：接入方式与单局耗时构成（2026-09-14）
+## 12.9 远程 ADB（远程主机上的安卓模拟器）：接入方式与单局耗时构成（2026-09-14）
+
+> ⚠️ **该远程模拟器主机已重装下线（2026-09-22）**，本节地址一律写作 `<host:port>` 占位；要用远程跑批需另找机器，`-serial` / `-adb` 按新机重填。
 
 把模拟器装到远程机器上跑，可以减少本机占用。接入方式与实测数据如下。
 
 **接入（一次 connect 即可，不需要额外的端口转发）**
 
 ```bash
-adb connect 192.168.50.217:16384        # MuMu 系默认 adb 端口；7555 也监听同一实例
-adb -s 192.168.50.217:16384 shell wm size
+adb connect <host:port>        # MuMu 系默认 adb 端口；7555 也监听同一实例
+adb -s <host:port> shell wm size
 go run ./cmd/helper -target android -game sparkle \
-  -serial 192.168.50.217:16384 -adb "<adb 路径>" -plan -live
+  -serial <host:port> -adb "<adb 路径>" -plan -live
 ```
 
 - 设备身份：指纹 `Samsung/a52xq/a52xq:15/V417IR/972`（**V417IR 是 MuMu 内部版本号**，
@@ -365,7 +367,7 @@ Chebyshev 判据逐帧采样；`repro_step10.py` 负责「恢复到主界面 →
 > plan 终点既然收敛到**结算页**，跑批脚本就不能再用「终态帧必须回到主界面」做校验 ——
 > 那会对**每个胜局假报失败**（实测新档 2/2 胜局全被标 ✗，纯属口径过期）。
 > 正确判据 = **「终态帧上的胜负标记」与「plan 判胜步的结论」一致** ⇒ 双向独立验证。
-> 远程跑批脚本 `.workbuddy/sparkle/remote/batch_remote.sh`（串口 `192.168.50.217:16384`、
+> 远程跑批脚本 `.workbuddy/sparkle/remote/batch_remote.sh`（串口 `<host:port>`、
 > 起点复位交给 `restore.py`）已按此口径实现。
 
 ---
@@ -388,9 +390,9 @@ Chebyshev 判据逐帧采样；`repro_step10.py` 负责「恢复到主界面 →
 
 ---
 
-### 六、远程跑批 10 局（217 模拟器，2026-09-15）
+### 六、远程跑批 10 局（远程 MuMu 模拟器，2026-09-15）
 
-环境：`adb connect 192.168.50.217:16384`（MuMu，伪装 SM-A5260 / Android 15 / 900×1600）。
+环境：`adb connect <host:port>`（MuMu，伪装 SM-A5260 / Android 15 / 900×1600）。
 脚本：`.workbuddy/sparkle/remote/batch_remote.sh`（起点复位调 `restore.py`；
 ⚠️ 本地版 `batch.sh` 写死 `127.0.0.1:5555`，跑不了远程）。
 

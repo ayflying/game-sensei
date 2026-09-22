@@ -715,7 +715,7 @@ func (p *Profile) normalizeHints() error {
 | `-game jieyou -print-protocol` | 加载成功、world 10 条 / 753 字符。顺手清理 `"zoom": true` 存量残留（全代码库已无消费点，且会致 `DisallowUnknownFields` 加载失败——**改前该档案完全无法加载**） |
 | `-game mobile_generic -print-protocol` | 零影响（world 3 条 / 82 字符与改前一致；无 `battle_detect`，只有 world 段） |
 | 文档同步 | README 已拆分 → 正文同步到 `docs/action-layer.md`（§9.5：三桶字段与注入规则、门禁 500/4000、`-print-protocol` 自检）与 `docs/teacher-demo-video.md`（§9.4：`-demo-hints` 行指向 `-print-protocol`；hints 坑条目补「决策侧（`ActionProtocol`）同期对齐」） |
-| 真机 `-demo` 两段（world / 战斗） | **未执行**：验收所需真机 `1cd89cd4` 不在线（当时仅 `ecbff3a5` 与远程 217），Ollama 亦未响应。待设备恢复后补跑，口径 = 不劣化（空答复率 / 动作种类数 / 重复告警次数） |
+| 真机 `-demo` 两段（world / 战斗） | **未执行**：验收所需真机 `1cd89cd4` 不在线（当时仅 `ecbff3a5` 与远程机），Ollama 亦未响应。待设备恢复后补跑，口径 = 不劣化（空答复率 / 动作种类数 / 重复告警次数） |
 
 ### 10.2 与 §五 标称数字的差异说明（重要）
 
