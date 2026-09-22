@@ -238,13 +238,54 @@ go run ./cmd/helper -game pc_generic -frames 100
 - `adb shell input tap` 被系统**静默吞掉**（不报错、界面毫无反应）。
 
 排查时极易误判成「游戏吞了输入」或「MIUI 截图 toast 干扰」。
-**设备侧一键修正**：
+
+#### 旧策略（2026-09-12，耗电，已弃用）：强制常亮
 
 ```bash
 adb shell settings put global stay_on_while_plugged_in 7   # 充电时保持常亮
 ```
 
-**回路侧**也加了保护（`cmd/helper/demo.go`）：黑帧均值 `blackFrameMean=12.0`，
+代价是设备**永远不熄屏**，长时间跑批下屏幕与渲染持续满耗。2026-09-21 起改为
+「允许休眠 + 抓帧时自动唤醒」。
+
+#### 现策略（2026-09-21）：允许休眠，抓帧前自动唤醒并解锁
+
+省电档用 `cmd/power -save`（实现 `internal/android/power.go`）：允许插电休眠、
+亮度压到最低档、熄屏超时压到 2 分钟。**抓帧侧不再依赖常亮**——`Device.Screenshot()`
+在每次 `screencap` 前做一次带节流的休眠自检，熄屏就 `KEYCODE_WAKEUP` + 解除锁屏。
+`Grab` / `GrabColor` / `ScreenSize` 都经由 `Screenshot`，所以全部抓帧路径都已覆盖。
+
+四条实测事实（MIX 3 / Android 10 / MIUI 12.5，2026-09-21~22）：
+
+1. **游戏自己持着屏幕常亮锁**。`dumpsys power` 可见
+   `SCREEN_BRIGHT_WAKE_LOCK 'WindowManager' ... ws=WorkSource{com.tencent.nrc}` ——
+   UE4 全屏应用的 `FLAG_KEEP_SCREEN_ON`。**游戏在前台时屏幕不会自然熄屏**
+   （实测把超时压到 20 秒、等 80 秒仍 `Awake`）。所以 `stay_on_while_plugged_in=0`
+   只在游戏不在前台时才生效；指望「自然熄屏省电」在游戏运行时走不通。
+2. **亮度值域不是 0~255**。Android 标准是 0~255，而这台 MIUI 实测是 **10~2047**
+   （默认 536）。同一个「414」在前者是超上限、在后者才约 20% —— 只看绝对值会得出
+   相反结论。`PowerState.BrightnessPercent()` 按设备实际值域换算，绝对值的夹取
+   也改用读回的 min/max。
+3. **唤醒后会停在滑动锁屏**，即使这台设备没设密码（`dumpsys trust` 报
+   `deviceLocked=0`）。此时触摸与按键**全部落到锁屏上**，表现仍是「操作无效」，
+   比熄屏更难定位。必须 `wm dismiss-keyguard` 解除（实测可一步回到游戏，
+   前台仍是 `com.tencent.nrc`）。判据用 `dumpsys window` 的
+   `mDreamingLockscreen=true/false`。
+4. **`WAKEUP` 与 `dismiss-keyguard` 之间要等约 1.2 秒**。合成一条 shell 用设备端
+   `sleep 0.5` 间隔实测**静默失败**（画面仍停在锁屏）——熄屏时 keyguard 还没随屏幕
+   起来，dismiss 被忽略。改成宿主侧等待后稳定生效。
+
+#### ⚠️ 主动熄屏的代价：在线游戏会掉线
+
+熄屏省电虽有效，但**长时间熄屏会掐断在线游戏**。实测熄屏 3 分钟后抓帧唤醒：
+进程存活、画面正常，但弹出 `当前网络状态不稳定，请重试`，点「返回」后游戏
+**回退到冷启动开屏页**（`M世界` / `UNREAL` logo / 防沉迷提示），重新加载约需 40 秒
+才回到大世界。Android 的 Doze 在熄屏后限制后台网络，心跳因此断开。
+
+⇒ **跑批间隙不要长时间主动熄屏**；省电主力是**降亮度**（5% 档实测生效），
+熄屏只适合游戏退出后的闲置期。
+
+**回路侧**另有兜底（`cmd/helper/demo.go`）：黑帧均值 `blackFrameMean=12.0`，
 发现黑帧就发一次 `KEY wakeup` 并等 2 秒重取；仍然黑则跳过本步（不落示范样本），
 同时重置卡死计数，避免把「黑屏」当成「卡死」而触发脱困。
 

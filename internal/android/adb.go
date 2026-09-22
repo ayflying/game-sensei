@@ -55,6 +55,15 @@ type Device struct {
 	size image.Point
 	// color 缓存最近一次截图的彩色原图，便于抓一次同时供决策（灰度）与送审（彩色存档）。
 	color image.Image
+
+	// autoWakeOff 关闭抓帧前的自动唤醒（默认开启，见 power.go）。
+	autoWakeOff bool
+	// lastWakeCheck 是上一次休眠自检的时刻，用于节流（见 ensureAwakeThrottled）。
+	lastWakeCheck time.Time
+	// brightMin/brightMax 缓存设备亮度值域（首次查询后不变，见 power.go）。
+	// brightMax=0 表示尚未查询过。
+	brightMin int
+	brightMax int
 }
 
 // FindADB 依次在环境变量、PATH、常见安装位置查找 adb 可执行文件。

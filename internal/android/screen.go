@@ -15,7 +15,11 @@ import (
 //
 // 走 `adb exec-out screencap -p`：exec-out 不做换行转换，PNG 二进制可安全传输。
 // 抓取结果会缓存，供 SavePNG / LastColor 复用，避免同一帧重复拉取。
+//
+// 抓帧前先做一次带节流的休眠自检：熄屏时 screencap 返回的是纯黑图，
+// 上层判据会静默失效而非报错，所以这里必须兜住（见 power.go）。
 func (d *Device) Screenshot() (image.Image, error) {
+	d.ensureAwakeThrottled()
 	raw, err := d.execOut("screencap", "-p")
 	if err != nil {
 		return nil, err

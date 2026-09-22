@@ -173,7 +173,7 @@ game-sensei/
 |---|---|---|
 | [`docs/quickstart.md`](docs/quickstart.md) | §9 前言、§9.1、§9.2 | 构建与运行骨架、教师模型环境、异步教学回路 |
 | [`docs/backends.md`](docs/backends.md) | §9.3、§9.3.1~§9.3.3 | 双后端（PC / 安卓 ADB）、PC 档案、输入注入被反作弊拦截、扫描码坑 |
-| [`docs/action-layer.md`](docs/action-layer.md) | §9.5 | L1/L2 动作分层、档案字段、内置档案与换游戏流程、设备息屏坑 |
+| [`docs/action-layer.md`](docs/action-layer.md) | §9.5 | L1/L2 动作分层、档案字段、内置档案与换游戏流程、**设备省电与息屏**（允许休眠 + 抓帧自动唤醒解锁、亮度值域坑、熄屏致掉线） |
 | [`docs/teacher-demo-video.md`](docs/teacher-demo-video.md) | §9.3、§9.4、§9.6、§9.7 | 独立图片理解 `cmd/vlm`（配置渠道优先、Ollama 兜底）、老师在线示范 `-demo`、教学视频判读 `cmd/video`、本地 OCR `cmd/ocr`（确定性读屏文字） |
 | [`docs/cgo-free.md`](docs/cgo-free.md) | §11 前言、§11.1~§11.4 | 纯 Go 截屏/键鼠 syscall、去 CGO 学生推理、推荐组合、发布形态 |
 | [`docs/runtime-notes.md`](docs/runtime-notes.md) | §11.5~§11.8 | 锁屏致 GDI 失效、窗口感知域、浮窗挂死、9B 老师复读机 |

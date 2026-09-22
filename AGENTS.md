@@ -157,6 +157,7 @@
   | 界面文字识别（OCR） | `cmd/ocr` | `internal/ocr`（常驻子进程，`server.py` 内嵌） |
   | 画面 → 纯文本（亮度/色相/面板图、**颜色掩膜找色块与质心**） | `cmd/see` | `cmd/see/main.go` |
   | 真机截图 / 压缩 / 点位 / 帧差 Δ / A-B 对照 | `cmd/shot` | `internal/android` + `internal/vision` |
+  | **真机省电与休眠**（亮度 / 熄屏超时 / 允许休眠 / 唤醒解锁 / 电量） | `cmd/power`（`-status` / `-save` / `-wake` / `-sleep`） | `internal/android/power.go` |
   | **游戏经营循环**（「地下城里开商店」制作-收取 / 市场收单-挂单：全 OCR 当帧定位，零写死坐标、零钻石支出） | `cmd/forge`（`-rounds` 制作线、`-market` 卖货线） | `cmd/forge/main.go` |
   | 画面缩放与区域裁剪 | — | `internal/vision`（`Downscale` / `Zoom` / `ParseRect` / `Crop` / `FrameDiff`） |
   | 坐标标定 | `tools/grid_overlay.py` | — |
@@ -246,7 +247,7 @@ git status
 - 项目日志：`.workbuddy/memory/YYYY-MM-DD.md`（**append-only**，当天已完成的**事实**）。
 - 长期项目约定：`.workbuddy/memory/MEMORY.md`（就地更新）。
 - 调试工具集 `cmd/`：`winlist`（列窗口）、`winshot`（置顶+截全屏）、`winclick`（置顶+点击）、`focusdbg`（前台 Win32 类名诊断）、`unlock-watch`（等解锁后置顶）、`overlay-test`。
-- 观测工具集 `cmd/`：`shot`（真机截图/压缩/点位/Δ）、`see`（画面转纯文本 + 颜色掩膜定位）、`vlm`（图片语义判读）、`ocr`（界面文字识别）。四个都编译进 `.workbuddy/bin/`，用之前先看 §2 的能力表。
+- 观测工具集 `cmd/`：`shot`（真机截图/压缩/点位/Δ）、`see`（画面转纯文本 + 颜色掩膜定位）、`vlm`（图片语义判读）、`ocr`（界面文字识别）、`power`（省电档/唤醒解锁/电量）。五个都编译进 `.workbuddy/bin/`，用之前先看 §2 的能力表。
 - 标定工具 `tools/`：`grid_overlay.py`（坐标读数）、`detect_state` / `runstats` / `watch` / `movetest`（洛王国真机跑批）。
 - CodeGraph：`C:/Users/ay/AppData/Local/codegraph/current/bin/codegraph.cmd`，重建索引 `codegraph init -i`；`.codegraph/` 已 gitignore。
 - 老师模型本地 Ollama 项目实例：端口 **11435**，模型库 `.ollama/models`，启动 `tools/serve_ollama.sh`。
