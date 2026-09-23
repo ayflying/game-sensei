@@ -179,6 +179,17 @@ type Profile struct {
 	Plan *plan.Plan `json:"plan,omitempty"`
 }
 
+// SetJoystickCenter 在运行时覆盖摇杆中心（归一化坐标）。
+//
+// 背景：同一款游戏不同 HUD 布局下摇杆位置会漂移（nrc 实测：带精灵列表布局
+// (0.165,0.653)、普通布局 (0.21,0.79)）。档案里只能存一个值，探索工具需要
+// 按当前布局临时切换——命令行覆盖比改档案重编译（go:embed）轻得多。
+// 只影响 MOVE 的摇杆展开，不改档案文件本身。
+func (p *Profile) SetJoystickCenter(x, y float64) {
+	p.Move.Center[0] = x
+	p.Move.Center[1] = y
+}
+
 // SemanticSlots 返回语义类对应的按钮名槽位列表（student_semantics 值按 `|` 拆分）。
 //
 // 学生线「点击闭环」按槽位轮换点击：单槽位 = 固定按钮（旧行为）；多槽位 = 学生

@@ -60,6 +60,11 @@ func main() {
 		adbPath  = flag.String("adb", "", "adb 可执行文件路径（留空自动查找）")
 		serial   = flag.String("serial", "", "设备序列号（留空取唯一在线设备）")
 		verbose  = flag.Bool("v", true, "逐步骤打印")
+		// joyOverride 允许在命令行临时覆盖档案里的摇杆中心。背景：同一款游戏
+		// 不同 HUD 布局下摇杆位置会变（nrc 实测：带精灵列表布局 (0.165,0.653)、
+		// 普通布局 (0.21,0.79)，见 docs/nrc-field-notes.md §11.37），改档案要重编
+		// （go:embed），探索时来回切布局用命令行覆盖最省事。
+		joyOverride = flag.String("joystick", "", "覆盖摇杆中心 \"x,y\"（归一化坐标，如 0.165,0.653）")
 	)
 	flag.Parse()
 
@@ -70,6 +75,14 @@ func main() {
 	prof, err := game.Load(*gameName)
 	if err != nil {
 		fail(err)
+	}
+	if *joyOverride != "" {
+		var jx, jy float64
+		if _, err := fmt.Sscanf(*joyOverride, "%g,%g", &jx, &jy); err != nil {
+			fail(fmt.Errorf("-joystick 格式应为 \"x,y\"（归一化坐标）: %v", err))
+		}
+		prof.SetJoystickCenter(jx, jy)
+		fmt.Printf("摇杆中心已覆盖为 (%.3f, %.3f)\n", jx, jy)
 	}
 	fmt.Printf("设备 %s ｜ 档案 %s（%s）\n", dev.Describe(), prof.Name, *gameName)
 	if !prof.CanDetectBattle() {
