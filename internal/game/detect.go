@@ -57,7 +57,7 @@ func (p *Profile) IsBattle(img image.Image) bool {
 	if !p.CanDetectBattle() || img == nil {
 		return false
 	}
-	return p.battleByColumns(img) || p.battleByLocalContrast(img)
+	return p.battleByColumns(img) || p.battleByLocalContrast(img) || p.battleByBrightDiscs(img)
 }
 
 // battleByColumns 是 2026-09-12 标定的原判据：检测带内「亮且低饱和」像素的列投影，
@@ -272,6 +272,81 @@ func (p *Profile) battleByLocalContrast(img image.Image) bool {
 		inS /= float64(inN)
 		ringL /= float64(ringN)
 		if inL-ringL >= contrastMin && inS <= float64(satMax) && inL >= float64(bright) {
+			hits++
+		}
+	}
+	return hits >= minHits
+}
+
+// battleByBrightDiscs 在标定位置上数「亮且低饱和」像素：圆盘内这样的像素达到
+// DiscMinPixels 就算这个位置有按钮图标，命中 ≥MinHits 个位置即判战斗。
+//
+// 为什么需要第三条判据（2026-09-24 真机实证，MIX 3 2340x1080）：
+//
+//	UI 改版后底栏五钮中四个变成深色圆底+白色图标（只有「技能」仍是亮盘），
+//	「内盘比外环亮」的局部对比度判据对深色钮恒为负差值，真战斗全部漏判
+//	（同日两次遇敌 battle_detect 均 false，hunt 因此永远打不到「遇敌即停」）。
+//	但白色图标本身稳定：改版前后每个钮圆盘内「亮(≥180)且低饱和(≤70)」像素
+//	实测 2041~6154 个（两代 UI、五个钮），而大世界同一批位置除个别高饱和
+//	亮块（3301）外普遍为 0。DiscMinPixels=1500 + MinHits=3 与三组样本完美分离。
+//
+// 位置约束照旧：只有落在档案标定位置上的才计数，避免全图亮块误报。
+func (p *Profile) battleByBrightDiscs(img image.Image) bool {
+	d := p.BattleDetect
+	if d == nil || len(d.Positions) == 0 {
+		return false
+	}
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 {
+		return false
+	}
+	discBright := d.DiscBright
+	if discBright <= 0 {
+		discBright = 180
+	}
+	discSat := d.DiscSat
+	if discSat <= 0 {
+		discSat = 70
+	}
+	discMin := d.DiscMinPixels
+	if discMin <= 0 {
+		discMin = 1500
+	}
+	minHits := d.MinHits
+	if minHits <= 0 {
+		minHits = 3
+	}
+	rOutPx := d.radiusOut() * float64(w)
+	at := rgbSampler(img)
+
+	hits := 0
+	for _, want := range d.Positions {
+		px := want[0] * float64(w)
+		py := want[1] * float64(h)
+		count := 0
+		x0 := int(px - rOutPx - 1)
+		x1 := int(px + rOutPx + 1)
+		y0 := int(py - rOutPx - 1)
+		y1 := int(py + rOutPx + 1)
+		for y := y0; y <= y1; y++ {
+			for x := x0; x <= x1; x++ {
+				if x < b.Min.X || y < b.Min.Y || x >= b.Max.X || y >= b.Max.Y {
+					continue
+				}
+				dx := float64(x) - px
+				dy := float64(y) - py
+				if dx*dx+dy*dy > rOutPx*rOutPx {
+					continue
+				}
+				r, g, bb := at(x, y)
+				mx := int(max3(r, g, bb))
+				if mx >= discBright && mx-int(min3(r, g, bb)) <= discSat {
+					count++
+				}
+			}
+		}
+		if count >= discMin {
 			hits++
 		}
 	}

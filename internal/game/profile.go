@@ -254,6 +254,19 @@ type BattleDetect struct {
 	// LocalContrast 内盘平均亮度要比外环高多少，才算「这个位置上有个圆钮」。
 	// 缺省 18。实测（3200x2136）：真实战斗圆钮 +18~+96；世界态同一批位置 -61~+3。
 	LocalContrast float64 `json:"local_contrast,omitempty"`
+	// DiscBright / DiscSat 是「亮盘计数」判据的阈值：在标定位置半径 LocalROut 的
+	// 圆盘内，亮度 ≥DiscBright 且饱和度 ≤DiscSat 的像素数达到 DiscMinPixels，
+	// 就算这个位置有圆钮；命中 ≥MinHits 个位置即判战斗。
+	//
+	// 为什么需要第三条判据（2026-09-24 真机实证）：UI 改版后底栏五钮中四个变成
+	// **深色圆底+白色图标**（只有「技能」还是亮盘）——「内盘比外环亮」的局部对比度
+	// 判据对深色钮恒为负差值，全部漏判。但**白色图标本身**是稳定的：改版前后
+	// 每个钮的圆盘内都有大把「亮且低饱和」像素（0924 战斗 2420~3258 个、0918 旧 UI
+	// 2041~6154 个），而大世界同一批位置除了个别高饱和亮块外普遍为 0~3301。
+	// 取 DiscMinPixels=1500、MinHits=3 可同时覆盖两代 UI 且不误报世界态。
+	DiscBright     int `json:"disc_bright,omitempty"`
+	DiscSat        int `json:"disc_sat,omitempty"`
+	DiscMinPixels  int `json:"disc_min_pixels,omitempty"`
 }
 
 // tolerances 返回位置匹配容差，缺省 0.015。
@@ -266,6 +279,14 @@ func (d *BattleDetect) tolerances() (tolX, tolY float64) {
 		tolY = 0.015
 	}
 	return
+}
+
+// radiusOut 返回局部量测的外环/圆盘半径（按帧宽归一化），缺省 0.026。
+func (d *BattleDetect) radiusOut() float64 {
+	if d.LocalROut > 0 {
+		return d.LocalROut
+	}
+	return 0.026
 }
 
 // CanDetectBattle 报告档案是否配了可用的战斗态判据。
