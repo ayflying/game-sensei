@@ -36,11 +36,15 @@
   .text{flex:1;min-width:0}
   .text p{margin:0 0 8px}
   .text .lbl{font-weight:650}
-  .figs{flex:0 0 232px;display:flex;gap:10px}
+  .figs{flex:0 0 264px;display:flex;gap:8px}
   .figs figure{margin:0;flex:1}
   .figs img{width:100%;border:1px solid var(--line);border-radius:7px;display:block;background:#fff}
   .figs figcaption{font-size:11px;color:var(--sub);margin-top:5px;text-align:center;word-break:break-all}
   .plain{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:12px;font-size:14px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(108px,1fr));gap:12px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+  .grid figure{margin:0}
+  .grid img{width:100%;border:1px solid var(--line);border-radius:7px;display:block;background:#fff}
+  .grid figcaption{font-size:11px;color:var(--sub);margin-top:5px;text-align:center;line-height:1.4}
   table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13.5px}
   th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
   th{background:#fafbfc;font-size:12.5px;color:var(--sub)}
@@ -66,7 +70,7 @@
   <div><b>测试设备</b>Samsung SM-A035F（Galaxy A03）· Android 13</div>
   <div><b>屏幕</b>720 × 1600，density 300（竖屏）</div>
   <div><b>游戏包名</b>com.yoyaworld.dressup.makeup.asmr.cosplay.fashion.style</div>
-  <div><b>测试时间</b>2026-09-28 15:44 – 16:24（约 40 分钟）</div>
+  <div><b>测试时间</b>2026-09-28 15:44 – 17:11（两轮巡检，约 1.5 小时）</div>
   <div><b>连接方式</b>无线 ADB（192.168.50.159）</div>
   <div><b>取证方式</b>真机截图 + 界面文字识别 + 画面语义判读</div>
 </div>
@@ -76,16 +80,18 @@
 <!-- ============ P1 ============ -->
 <div class="issue">
   <div class="top"><span class="tag t-p1">严重</span><h3>公告弹窗反复自动弹出，拦截主界面入口，NEW 无法进入</h3></div>
-  <div class="time">发生时间：2026-09-28 16:22 – 16:23（连续复现 2 次）</div>
+  <div class="time">发生时间：2026-09-28 16:22 – 16:23、16:37 – 16:38（累计复现 7 次，命中率 100%）</div>
   <div class="body">
     <div class="text">
-      <p><span class="lbl">现象：</span>关闭 Notice 公告弹窗后主界面恢复正常、按钮全部可见（证据 A）；随后点击主界面右侧的 NEW 按钮，Notice 公告弹窗**立即重新弹出**并遮挡整个界面，NEW 页面没有被打开（证据 B）。相同操作连续执行两次，结果一致。</p>
-      <p><span class="lbl">影响：</span>NEW 入口在弹窗反复弹出的情况下实际无法进入，用户每次点击都会被公告打断。</p>
-      <p><span class="lbl">证据：</span>A 关闭弹窗后的干净主界面；B 点击 NEW 后弹窗重现。</p>
+      <p><span class="lbl">现象：</span>关闭 Notice 公告弹窗后主界面恢复干净、按钮全部可见（证据 A）；随后点击主界面右侧的 NEW 按钮，Notice 公告弹窗<b>立即重新弹出</b>并遮挡界面，NEW 页面始终打不开（证据 C）。<b>累计 7 次点击 NEW，7 次全部弹出，无一例外。</b></p>
+      <p><span class="lbl">对照实验（排除「弹窗只是定时自动弹」）：</span>关闭弹窗后静置 6 秒不做任何操作，主界面保持干净、弹窗不出现（证据 B）；同样关掉弹窗后改点左侧 SHOP，则正常进入商店页、同样不弹公告。<b>可见弹窗由「点击 NEW」这一动作触发，而非定时自动弹出。</b></p>
+      <p><span class="lbl">影响：</span>NEW 入口实际不可达，用户每次点击 NEW 都只会得到公告弹窗。</p>
+      <p><span class="lbl">证据：</span>A 关闭弹窗后的干净主界面；B 静置 6 秒仍无弹窗（反例对照）；C 点击 NEW 后弹窗重现。</p>
     </div>
     <div class="figs">
       <figure><a href="https://workbuddy-space-static.codebuddy.work/image/qbYs5F9l3TS4a93kGlbIDb.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/qbYs5F9l3TS4a93kGlbIDb.jpg" alt="关闭弹窗后主界面"></a><figcaption>A 关闭后<br>16:22</figcaption></figure>
-      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/aAHEqHF3hhNwZgrL8L5SKZ.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/aAHEqHF3hhNwZgrL8L5SKZ.jpg" alt="点击NEW后弹窗重现"></a><figcaption>B 点 NEW 后<br>16:23</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/0qPz5C9nMNM2DRusfzCD3p.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/0qPz5C9nMNM2DRusfzCD3p.jpg" alt="静置6秒无弹窗"></a><figcaption>B 静置6秒<br>无弹窗</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/I2ytSZ4Q0MK8VQe1ddtcta.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/I2ytSZ4Q0MK8VQe1ddtcta.jpg" alt="点NEW后弹窗重现"></a><figcaption>C 点 NEW 后<br>16:37</figcaption></figure>
     </div>
   </div>
 </div>
@@ -107,14 +113,50 @@
   </div>
 </div>
 
-<!-- ============ P3 ============ -->
+<!-- ============ 直播邀请浮层 ============ -->
 <div class="issue">
-  <div class="top"><span class="tag t-p2">中等</span><h3>订阅中心（Subscription Center）不响应系统返回键</h3></div>
+  <div class="top"><span class="tag t-p1">严重</span><h3>直播邀请浮层没有可用的关闭途径，只能被迫进入直播</h3></div>
+  <div class="time">发生时间：2026-09-28 16:43 – 16:45（连续 6 种方式尝试均失败）</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">现象：</span>点击主界面顶部的「Live invite from Riley」邀请条后，弹出「Active Look Live」直播邀请浮层（证据 A）。该浮层<b>没有任何可见的关闭控件</b>，以下 6 种常规退出方式逐一实测均无效：</p>
+      <p>① 浮层右上角无 X／关闭按钮（已裁剪放大确认）；② 系统返回键；③ 点击浮层以外的空白区域；④ 静置 8 秒等待自动消失；⑤ 再次点击顶部邀请条（未收起，浮层仍在）；⑥ 从屏幕左缘右滑（系统侧滑返回手势）。</p>
+      <p><span class="lbl">影响：</span>浮层遮挡主界面中部，用户唯一出路是点击「Go to live!」进入直播间（证据 B）。对被邀请却不想开播的用户来说，这是一次无法回避的强制跳转。</p>
+      <p><span class="lbl">证据：</span>A 浮层全貌（无可见关闭控件）；B 点「Go to live!」后进入直播间。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/Q5efOZ31NfVgB4aILAL1dc.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/Q5efOZ31NfVgB4aILAL1dc.jpg" alt="直播邀请浮层无关闭控件"></a><figcaption>A 邀请浮层<br>16:43</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/ACdTNNq3pE4PtPTQnBZgla.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/ACdTNNq3pE4PtPTQnBZgla.jpg" alt="进入直播间"></a><figcaption>B 唯一出口<br>16:46</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<!-- ============ P3 返回键 ============ -->
+<div class="issue">
+  <div class="top"><span class="tag t-p2">中等</span><h3>系统返回键在 6 个二级页面全部失效（直播间、第三方广告页却正常）</h3></div>
+  <div class="time">发生时间：2026-09-28 16:03 – 17:11（逐页实测）</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">现象：</span>在这些二级页面按下系统返回键，页面<b>没有任何反应</b>，只能点页内的返回箭头／关闭按钮退出。已实测失效的页面共 <b>6 个</b>：订阅中心（Store）、换装编辑页（Dress up）、Community（POST）、SHOP、Settings、人气奖励（Popularity Rewards）。</p>
+      <p><span class="lbl">已排除「延迟生效」：</span>Settings 页按下返回键后等待 8 秒仍不退出（证据 A）；SHOP 页等待 6 秒仍留在原地（证据 B）；人气奖励页同样无反应（证据 C）。</p>
+      <p><span class="lbl">反例对照：</span>同一台设备、同样的按键，在<b>直播间页面</b>和<b>第三方广告页</b>上都能正常返回——说明按键事件已送达游戏，是这些二级页面自身忽略了返回事件。</p>
+      <p><span class="lbl">影响：</span>不符合 Android 返回键习惯，习惯用返回键的用户在每个二级页面都会先被卡住一次。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/tgRoWeebQdq2ry8RqCNWJq.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/tgRoWeebQdq2ry8RqCNWJq.jpg" alt="Settings返回键8秒无效"></a><figcaption>A Settings<br>8 秒仍不退</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/FytZvJRGAzKKoofw1TqiWg.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/FytZvJRGAzKKoofw1TqiWg.jpg" alt="SHOP返回键无效"></a><figcaption>B SHOP<br>6 秒仍不退</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/wTJtq9C64t9RTBJhSjTM0Y.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/wTJtq9C64t9RTBJhSjTM0Y.jpg" alt="人气奖励页返回键无效"></a><figcaption>C 人气奖励页<br>无反应</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<!-- ============ P4 保留：原订阅页证据 ============ -->
+<div class="issue">
+  <div class="top"><span class="tag t-p2">中等</span><h3>订阅中心（Subscription Center）返回键失效的首次记录</h3></div>
   <div class="time">发生时间：2026-09-28 16:03</div>
   <div class="body">
     <div class="text">
-      <p><span class="lbl">现象：</span>在 Subscription Center 订阅付费页按系统返回键，页面**没有任何反应**，仍停留在订阅页（证据 A）。只有点击页面左上角的关闭控件才能退出回到主界面（证据 B）。</p>
-      <p><span class="lbl">影响：</span>用户按常规返回操作无法退出付费页，容易被困在该页面。</p>
+      <p><span class="lbl">现象：</span>首轮测试中在订阅付费页按系统返回键，页面无反应、仍停留在订阅页（证据 A）；点击左上角关闭控件后才能回到主界面（证据 B）。此项已并入上一条「系统返回键在 6 个二级页面失效」。</p>
       <p><span class="lbl">证据：</span>A 按返回键后仍为本页；B 点左上角关闭后回到主界面。</p>
     </div>
     <div class="figs">
@@ -126,12 +168,11 @@
 
 <!-- ============ P4 ============ -->
 <div class="issue">
-  <div class="top"><span class="tag t-p2">中等</span><h3>换装编辑页（Dress up）不响应系统返回键</h3></div>
+  <div class="top"><span class="tag t-p2">中等</span><h3>换装编辑页（Dress up）返回键失效的首次记录</h3></div>
   <div class="time">发生时间：2026-09-28 16:06</div>
   <div class="body">
     <div class="text">
-      <p><span class="lbl">现象：</span>在 Dress up 换装编辑页按系统返回键，页面无反应，仍停留在换装编辑页；必须点击页面内的返回箭头才能退出。</p>
-      <p><span class="lbl">影响：</span>与订阅页同类问题，系统级返回操作在该页失效。</p>
+      <p><span class="lbl">现象：</span>在 Dress up 换装编辑页按系统返回键，页面无反应、仍停留在换装编辑页；必须点击页内返回箭头才能退出。此项已并入上一条「系统返回键在 6 个二级页面失效」。</p>
       <p><span class="lbl">证据：</span>按返回键后依旧停留在换装编辑页。</p>
     </div>
     <div class="figs">
@@ -147,7 +188,7 @@
   <div class="body">
     <div class="text">
       <p><span class="lbl">现象：</span>从主界面点击 LIVE SHOW 入口后，弹出的不是页面本身，而是第三方广告（<b>War Thunder Mobile</b>，Google Play 下载页，左下角带“广告”标识）。该广告为“拖动拼图”互动形式。</p>
-      <p><span class="lbl">影响：</span>广告页右上 / 左上均**无关闭或跳过控件**，用户只能等待约 12 秒、直到出现 Reward granted 后，再用系统返回键退出，然后才进入 LIVE SHOW 换装页。</p>
+      <p><span class="lbl">影响：</span>广告页右上 / 左上均<b>无关闭或跳过控件</b>，用户只能等待约 12 秒、直到出现 Reward granted 后，再用系统返回键退出，然后才进入 LIVE SHOW 换装页。</p>
       <p><span class="lbl">证据：</span>A 广告页；B 等待后出现 Reward granted。</p>
     </div>
     <div class="figs">
@@ -164,7 +205,7 @@
   <div class="time">发生时间：2026-09-28 16:03</div>
   <div class="body">
     <div class="text">
-      <p><span class="lbl">现象：</span>在 Body DIY 面板上点击 OK 后，页面跳到 Subscription Center 订阅付费页，而不是关闭面板。后续同类操作（16:07、16:14）点 OK 只关闭面板、未再跳转，因此**未能稳定复现**，需要进一步验证。</p>
+      <p><span class="lbl">现象：</span>在 Body DIY 面板上点击 OK 后，页面跳到 Subscription Center 订阅付费页，而不是关闭面板。后续同类操作（16:07、16:14）点 OK 只关闭面板、未再跳转，因此<b>未能稳定复现</b>，需要进一步验证。</p>
       <p><span class="lbl">证据：</span>点 OK 后出现的订阅付费页。</p>
     </div>
     <div class="figs">
@@ -174,21 +215,49 @@
 </div>
 
 <div class="issue">
-  <div class="top"><span class="tag t-p3">待复核</span><h3>THEME 页出现无主题、无 Start 按钮的中间态</h3></div>
-  <div class="time">发生时间：2026-09-28 15:54</div>
+  <div class="top"><span class="tag t-p3">待复核</span><h3>商店页「NO ADS」商品显示 Purchased，但游戏内仍大量出现广告</h3></div>
+  <div class="time">观察到时间：2026-09-28 16:51</div>
   <div class="body">
     <div class="text">
-      <p><span class="lbl">现象：</span>从主界面点击 PK CONTEST 进入后，THEME 页只显示标题，既没有主题名称也没有 Start 按钮（页面内容为空）。重新进入后恢复正常（主题 Musical Rebellion + Start 按钮）。</p>
-      <p><span class="lbl">推测：</span>疑似页面资源 / 数据尚未加载完成时的中间态或竞态；单次出现，需进一步验证。</p>
-      <p><span class="lbl">证据：</span>仅显示“THEME”标题的空页面。</p>
+      <p><span class="lbl">现象：</span>从主界面左上角 ADS 入口进入 Store / Subscription Center，商品卡「NO ADS!」下方的按钮显示为 <b>Purchased（已购买）</b>，且整页没有任何价格数字。</p>
+      <p><span class="lbl">矛盾点：</span>同一次测试中游戏内仍频繁出现广告 —— LIVE SHOW 入口弹第三方激励视频（War Thunder Mobile），进入 POST 页弹出 X2/X3/X4 广告翻倍浮层。</p>
+      <p><span class="lbl">为何只记为「待复核」：</span>无法确认该测试账号是否真的购买过该商品；也可能「NO ADS」只移除弹窗类广告、不含用户主动触发的激励视频。仅凭截图不能断定是状态显示错误，<b>需人工核对账号购买记录</b>。</p>
+      <p><span class="lbl">建议核对：</span>① 该测试账号的历史购买记录；②「NO ADS」的实际覆盖范围（是否包含激励视频广告）。</p>
     </div>
     <div class="figs">
-      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/Mg5JwK16AX2X2ZueN4mYZJ.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/Mg5JwK16AX2X2ZueN4mYZJ.jpg" alt="THEME页空状态"></a><figcaption>15:54</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/LbDQubvNc1ksnaCj7q9FQI.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/LbDQubvNc1ksnaCj7q9FQI.jpg" alt="商店页NO ADS显示Purchased"></a><figcaption>NO ADS 显示<br>Purchased</figcaption></figure>
     </div>
   </div>
 </div>
 
-<h2>三、测试环境与配置问题（非游戏缺陷）</h2>
+<div class="issue">
+  <div class="top"><span class="tag t-env">已排除</span><h3>【已排除，非缺陷】THEME 页“无主题、无 Start 按钮”实为页面加载中的中间态</h3></div>
+  <div class="time">首轮记录 15:54 · 复核修正 17:12</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">首轮记录：</span>15:54 从主界面点 PK CONTEST 进入后，THEME 页只显示标题、既无主题名称也没有 Start 按钮，当时暂记为“疑似空态”。</p>
+      <p><span class="lbl">复核结论：</span>经重新走查确认，该画面是 <b>THEME 主题页加载过程中的中间态</b>——主题卡片与 Start 按钮在资源加载完成后即正常显示（首轮重新进入即恢复为 Musical Rebellion + Start）。<b>第二轮巡检多次往返 CONTEST → THEME，均未再出现空态。</b></p>
+      <p><span class="lbl">结论：</span><b>不是缺陷，此项撤销。</b>仅保留为“加载过程中可能出现短暂无内容画面”的观察记录；若后续在弱网环境下能稳定复现，再重新立项。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/Mg5JwK16AX2X2ZueN4mYZJ.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/Mg5JwK16AX2X2ZueN4mYZJ.jpg" alt="THEME页加载中间态"></a><figcaption>THEME 加载态<br>15:54</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<h2>三、本次新增覆盖页面（逐页走查未见异常）</h2>
+
+<div class="plain">针对首轮未覆盖的入口逐页进入并做视觉走查（界面文字识别 + 画面语义判读），下列页面<b>未发现缺陷</b>，截图留证（可点击放大）：</div>
+
+<div class="grid">
+  <figure><a href="https://workbuddy-space-static.codebuddy.work/image/FmpB9BtaI5dfrEpMHkg778.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/FmpB9BtaI5dfrEpMHkg778.jpg" alt="Community社区页"></a><figcaption>POST / Community<br>16:35</figcaption></figure>
+  <figure><a href="https://workbuddy-space-static.codebuddy.work/image/LbDQubvNc1ksnaCj7q9FQI.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/LbDQubvNc1ksnaCj7q9FQI.jpg" alt="Store订阅中心"></a><figcaption>ADS → Store<br>16:51</figcaption></figure>
+  <figure><a href="https://workbuddy-space-static.codebuddy.work/image/7BR7nEfsrAlCyRVxYCT9ZO.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/7BR7nEfsrAlCyRVxYCT9ZO.jpg" alt="Popularity Rewards人气奖励页"></a><figcaption>奖杯 → 人气奖励<br>16:52</figcaption></figure>
+  <figure><a href="https://workbuddy-space-static.codebuddy.work/image/KJjnyi8SnMzrfM9XsVN1Xr.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/KJjnyi8SnMzrfM9XsVN1Xr.jpg" alt="POSE拍照页"></a><figcaption>POSE 拍照页<br>17:08</figcaption></figure>
+  <figure><a href="https://workbuddy-space-static.codebuddy.work/image/3InagJfM0Y3NC8ulKilbZw.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/3InagJfM0Y3NC8ulKilbZw.jpg" alt="Settings设置页"></a><figcaption>Settings 设置页<br>17:10</figcaption></figure>
+</div>
+
+<h2>四、测试环境与配置问题（非游戏缺陷）</h2>
 
 <div class="plain"><b>1. 无线 ADB 反复掉线（测试期间中断 4 次以上）</b><br>
 实测报错为 <code>adb server version (40) doesn't match this client (41); killing...</code>——本机同时存在不同版本的 adb 客户端，共用 5037 端口时互相终止服务，导致设备连接频繁断开。统一改用 Android SDK 版 adb 后连接稳定。此为测试环境问题，非游戏缺陷。</div>
@@ -199,27 +268,33 @@
 <div class="plain"><b>3. 图片判读渠道</b><br>
 首个接口密钥鉴权返回 401（Invalid API key）；更换密钥后鉴权通过，但所指定模型的多数名称在该网关上不存在（返回 HTTP 503），最终改用网关上实际存在的视觉模型完成判读。此项属配置问题，非游戏缺陷。</div>
 
-<h2>四、测试覆盖范围</h2>
+<h2>五、测试覆盖范围</h2>
 
 <table>
   <thead><tr><th style="width:34%">范围</th><th style="width:14%">状态</th><th>说明</th></tr></thead>
   <tbody>
     <tr><td>启动 / 关闭 / 重启</td><td class="ok">已覆盖</td><td>冷启动、force-stop 后重启均正常加载主界面</td></tr>
-    <tr><td>主界面各入口布局</td><td class="ok">已覆盖</td><td>ARS / SHOP / 奖杯 / POSE / NEW / POST / Dress up / LIVE SHOW / PK CONTEST 均可见</td></tr>
-    <tr><td>PK CONTEST 完整链路</td><td class="ok">已覆盖</td><td>THEME → Start → 三选一换装 → PK 演出 → VICTORY 结算，可完整跑通</td></tr>
-    <tr><td>SHOP → Custom Made</td><td class="ok">已覆盖</td><td>三组套装、看广告解锁提示正常显示</td></tr>
+    <tr><td>主界面各入口布局</td><td class="ok">已覆盖</td><td>ADS / SHOP / 奖杯 / POSE / NEW / POST / Dress up / LIVE SHOW / PK CONTEST 均可见</td></tr>
+    <tr><td>PK CONTEST 完整链路</td><td class="ok">已覆盖</td><td>THEME → Start → 三选一换装 → PK 演出 → VICTORY 结算，可完整跑通（两轮各 1 次）</td></tr>
+    <tr><td>SHOP → Custom Made</td><td class="ok">已覆盖</td><td>该页为商店唯一分页；三组套装、看广告解锁提示正常显示</td></tr>
     <tr><td>LIVE SHOW 换装页</td><td class="ok">已覆盖</td><td>发型网格、颜色条、礼物进度条显示正常</td></tr>
     <tr><td>Dress up 换装编辑页</td><td class="ok">已覆盖</td><td>人物立绘、分类栏、工具按钮显示正常</td></tr>
-    <tr><td>POST / 奖杯成就入口</td><td class="no">未覆盖</td><td>被公告弹窗反复拦截，本次未能进入</td></tr>
-    <tr><td>SHOP 其他分页</td><td class="no">未覆盖</td><td>仅检查了 Custom Made 一页</td></tr>
-    <tr><td>真实付费流程</td><td class="no">未覆盖</td><td>未进行任何真实支付操作</td></tr>
-    <tr><td>长时间运行稳定性</td><td class="no">未覆盖</td><td>本次为约 40 分钟短时巡检</td></tr>
+    <tr><td>POST / Community</td><td class="ok">已覆盖</td><td>帖子流、评论、点赞显示正常（本轮新增）</td></tr>
+    <tr><td>ADS → Store 订阅中心</td><td class="ok">已覆盖</td><td>3 个 tab（Special Offer / VIP / SVIP）显示正常（本轮新增）</td></tr>
+    <tr><td>奖杯 → Popularity Rewards</td><td class="ok">已覆盖</td><td>任务列表、Claim 领取按钮显示正常（本轮新增）</td></tr>
+    <tr><td>POSE 拍照页</td><td class="ok">已覆盖</td><td>姿势网格、拍照按钮显示正常（本轮新增）</td></tr>
+    <tr><td>Settings 设置页</td><td class="ok">已覆盖</td><td>Sound / Music / Language / Privacy / Terms 显示正常（本轮新增）</td></tr>
+    <tr><td>顶部 LIVE 邀请 → 直播间</td><td class="ok">已覆盖</td><td>可进入直播间，观众数与评论正常（本轮新增）</td></tr>
+    <tr><td>NEW 入口</td><td class="no">不可达</td><td>被 Notice 公告弹窗 100% 拦截（见问题一）</td></tr>
+    <tr><td>真实付费流程</td><td class="no">未覆盖</td><td>仅查看商店页面，未进行任何真实支付操作</td></tr>
+    <tr><td>长时间运行稳定性</td><td class="no">未覆盖</td><td>本次为约 1.5 小时短时巡检</td></tr>
   </tbody>
 </table>
 
 <footer>
-  测试时间 2026-09-28；设备 Samsung SM-A035F / Android 13 / 720×1600。<br>
-  报告中所有结论均来自真机实测截图，已复现与待复核条目分别标注；未覆盖范围如实列出，不代表已验证通过。
+  测试时间 2026-09-28（15:44 – 17:11，两轮巡检）；设备 Samsung SM-A035F / Android 13 / 720×1600。<br>
+  报告中所有结论均来自真机实测截图，已复现 / 待复核 / 已排除条目分别标注；未覆盖范围如实列出，不代表已验证通过。<br>
+  <b>第二轮更新（17:11）：</b>THEME 空态改判为加载中间态（非缺陷、已撤销）；新增「直播邀请浮层无可用关闭途径」；返回键失效范围由 2 个页面扩大到 6 个页面并附反例对照；新增商店 Purchased 待复核项；补齐 POST / Store / 人气奖励 / POSE / Settings 五个页面的走查。
 </footer>
 
 </div>
