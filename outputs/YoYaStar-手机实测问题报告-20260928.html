@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YoYa Star 手机实测问题与 Bug 报告（2026-09-28）</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --card:#ffffff; --ink:#1c1f23; --sub:#5c636b; --line:#e3e6ea;
+    --p1:#c62828; --p1bg:#fdecec; --p2:#b26a00; --p2bg:#fff6e5; --p3:#1a5fb4; --p3bg:#e9f1fc;
+    --env:#4a5561; --envbg:#eef1f4;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.65;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:28px 18px 64px}
+  header{border-bottom:3px solid var(--ink);padding-bottom:16px;margin-bottom:22px}
+  h1{font-size:24px;margin:0 0 6px;letter-spacing:.2px}
+  .lead{color:var(--sub);font-size:13.5px}
+  .meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:18px 0 26px}
+  .meta div{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:13px}
+  .meta b{display:block;color:var(--sub);font-weight:600;font-size:11.5px;letter-spacing:.4px;margin-bottom:3px}
+  h2{font-size:17px;margin:34px 0 14px;padding-left:10px;border-left:4px solid var(--ink)}
+  .issue{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px;
+    box-shadow:0 1px 3px rgba(16,24,40,.04)}
+  .issue .top{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:4px}
+  .tag{font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:20px;letter-spacing:.3px}
+  .t-p1{background:var(--p1bg);color:var(--p1)}
+  .t-p2{background:var(--p2bg);color:var(--p2)}
+  .t-p3{background:var(--p3bg);color:var(--p3)}
+  .t-env{background:var(--envbg);color:var(--env)}
+  .issue h3{font-size:15.5px;margin:0;font-weight:650}
+  .time{font-size:12.5px;color:var(--sub);margin:2px 0 10px}
+  .body{display:flex;gap:16px;align-items:flex-start}
+  .text{flex:1;min-width:0}
+  .text p{margin:0 0 8px}
+  .text .lbl{font-weight:650}
+  .figs{flex:0 0 232px;display:flex;gap:10px}
+  .figs figure{margin:0;flex:1}
+  .figs img{width:100%;border:1px solid var(--line);border-radius:7px;display:block;background:#fff}
+  .figs figcaption{font-size:11px;color:var(--sub);margin-top:5px;text-align:center;word-break:break-all}
+  .plain{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:12px;font-size:14px}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13.5px}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#fafbfc;font-size:12.5px;color:var(--sub)}
+  tr:last-child td{border-bottom:none}
+  .ok{color:#1e7b34;font-weight:650}
+  .no{color:#b3261e;font-weight:650}
+  footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);color:var(--sub);font-size:12.5px}
+  @media(max-width:640px){
+    .body{flex-direction:column}
+    .figs{flex:0 0 auto;width:100%;max-width:340px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>YoYa Star 手机实测问题与 Bug 报告</h1>
+  <div class="lead">在真机端到端操作后整理，每条问题均附截图证据与发生时间。截图可点击放大查看原图。</div>
+</header>
+
+<div class="meta">
+  <div><b>测试设备</b>Samsung SM-A035F（Galaxy A03）· Android 13</div>
+  <div><b>屏幕</b>720 × 1600，density 300（竖屏）</div>
+  <div><b>游戏包名</b>com.yoyaworld.dressup.makeup.asmr.cosplay.fashion.style</div>
+  <div><b>测试时间</b>2026-09-28 15:44 – 16:24（约 40 分钟）</div>
+  <div><b>连接方式</b>无线 ADB（192.168.50.159）</div>
+  <div><b>取证方式</b>真机截图 + 界面文字识别 + 画面语义判读</div>
+</div>
+
+<h2>一、确认的问题（可复现）</h2>
+
+<!-- ============ P1 ============ -->
+<div class="issue">
+  <div class="top"><span class="tag t-p1">严重</span><h3>公告弹窗反复自动弹出，拦截主界面入口，NEW 无法进入</h3></div>
+  <div class="time">发生时间：2026-09-28 16:22 – 16:23（连续复现 2 次）</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">现象：</span>关闭 Notice 公告弹窗后主界面恢复正常、按钮全部可见（证据 A）；随后点击主界面右侧的 NEW 按钮，Notice 公告弹窗**立即重新弹出**并遮挡整个界面，NEW 页面没有被打开（证据 B）。相同操作连续执行两次，结果一致。</p>
+      <p><span class="lbl">影响：</span>NEW 入口在弹窗反复弹出的情况下实际无法进入，用户每次点击都会被公告打断。</p>
+      <p><span class="lbl">证据：</span>A 关闭弹窗后的干净主界面；B 点击 NEW 后弹窗重现。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/qbYs5F9l3TS4a93kGlbIDb.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/qbYs5F9l3TS4a93kGlbIDb.jpg" alt="关闭弹窗后主界面"></a><figcaption>A 关闭后<br>16:22</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/aAHEqHF3hhNwZgrL8L5SKZ.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/aAHEqHF3hhNwZgrL8L5SKZ.jpg" alt="点击NEW后弹窗重现"></a><figcaption>B 点 NEW 后<br>16:23</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<!-- ============ P2 ============ -->
+<div class="issue">
+  <div class="top"><span class="tag t-p1">严重</span><h3>Body DIY 面板提示文字与 CONTEST 按钮文字重叠串字</h3></div>
+  <div class="time">发生时间：2026-09-28 16:07、16:14（稳定复现）</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">现象：</span>Body DIY（换脸 / 体型调节）面板背景为半透明，面板底部的提示文字 <code>Click blank area to close</code> 与底层主界面的 PK CONTEST 按钮文字发生重叠，画面实际显示为 <b>“Click blank area to closTEST”</b>，CONTEST 的首字母被压住。</p>
+      <p><span class="lbl">影响：</span>两段文字互相干扰、均不清晰，属面板层级 / 遮挡处理缺陷。</p>
+      <p><span class="lbl">证据：</span>左图为清晰可见的一次；右图为另一次复现（面板内容不同、串字现象相同）。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/aePSWibZcjgZDloytcjh18.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/aePSWibZcjgZDloytcjh18.jpg" alt="DIY面板文字与CONTEST重叠"></a><figcaption>16:07 复现</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/DNwWs0ZwTLSWmvLz3T27Et.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/DNwWs0ZwTLSWmvLz3T27Et.jpg" alt="DIY面板文字重叠首次"></a><figcaption>16:02 首现</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<!-- ============ P3 ============ -->
+<div class="issue">
+  <div class="top"><span class="tag t-p2">中等</span><h3>订阅中心（Subscription Center）不响应系统返回键</h3></div>
+  <div class="time">发生时间：2026-09-28 16:03</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">现象：</span>在 Subscription Center 订阅付费页按系统返回键，页面**没有任何反应**，仍停留在订阅页（证据 A）。只有点击页面左上角的关闭控件才能退出回到主界面（证据 B）。</p>
+      <p><span class="lbl">影响：</span>用户按常规返回操作无法退出付费页，容易被困在该页面。</p>
+      <p><span class="lbl">证据：</span>A 按返回键后仍为本页；B 点左上角关闭后回到主界面。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/z6RYdhYYSuDZYwzXidqD4W.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/z6RYdhYYSuDZYwzXidqD4W.jpg" alt="按返回键后仍在订阅页"></a><figcaption>A 返回键无效</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/4rO0VAx287Wel4Ffcanr01.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/4rO0VAx287Wel4Ffcanr01.jpg" alt="点关闭后回到主界面"></a><figcaption>B 点关闭后</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<!-- ============ P4 ============ -->
+<div class="issue">
+  <div class="top"><span class="tag t-p2">中等</span><h3>换装编辑页（Dress up）不响应系统返回键</h3></div>
+  <div class="time">发生时间：2026-09-28 16:06</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">现象：</span>在 Dress up 换装编辑页按系统返回键，页面无反应，仍停留在换装编辑页；必须点击页面内的返回箭头才能退出。</p>
+      <p><span class="lbl">影响：</span>与订阅页同类问题，系统级返回操作在该页失效。</p>
+      <p><span class="lbl">证据：</span>按返回键后依旧停留在换装编辑页。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/t2bQcNnV8DT0OXWjEScebL.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/t2bQcNnV8DT0OXWjEScebL.jpg" alt="换装页按返回键无效"></a><figcaption>返回键无效<br>16:06</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<!-- ============ P7 ============ -->
+<div class="issue">
+  <div class="top"><span class="tag t-p2">中等</span><h3>LIVE SHOW 入口弹出第三方激励广告，且广告页无关闭控件</h3></div>
+  <div class="time">发生时间：2026-09-28 16:09 – 16:10</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">现象：</span>从主界面点击 LIVE SHOW 入口后，弹出的不是页面本身，而是第三方广告（<b>War Thunder Mobile</b>，Google Play 下载页，左下角带“广告”标识）。该广告为“拖动拼图”互动形式。</p>
+      <p><span class="lbl">影响：</span>广告页右上 / 左上均**无关闭或跳过控件**，用户只能等待约 12 秒、直到出现 Reward granted 后，再用系统返回键退出，然后才进入 LIVE SHOW 换装页。</p>
+      <p><span class="lbl">证据：</span>A 广告页；B 等待后出现 Reward granted。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/COWhlNPAwY8gp5q9mHPgjx.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/COWhlNPAwY8gp5q9mHPgjx.jpg" alt="第三方拼图激励广告"></a><figcaption>A 广告页<br>16:09</figcaption></figure>
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/SOMm5Nx9gvYRU1yZa2n9On.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/SOMm5Nx9gvYRU1yZa2n9On.jpg" alt="等待后Reward granted"></a><figcaption>B 奖励发放<br>16:10</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<h2>二、待复核现象（出现过 1 次，未稳定复现）</h2>
+
+<div class="issue">
+  <div class="top"><span class="tag t-p3">待复核</span><h3>Body DIY 面板点 OK 跳转到订阅付费页</h3></div>
+  <div class="time">发生时间：2026-09-28 16:03</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">现象：</span>在 Body DIY 面板上点击 OK 后，页面跳到 Subscription Center 订阅付费页，而不是关闭面板。后续同类操作（16:07、16:14）点 OK 只关闭面板、未再跳转，因此**未能稳定复现**，需要进一步验证。</p>
+      <p><span class="lbl">证据：</span>点 OK 后出现的订阅付费页。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/BIBHRq7RqlOfwfLjX7QaWf.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/BIBHRq7RqlOfwfLjX7QaWf.jpg" alt="点OK后跳订阅页"></a><figcaption>16:03</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<div class="issue">
+  <div class="top"><span class="tag t-p3">待复核</span><h3>THEME 页出现无主题、无 Start 按钮的中间态</h3></div>
+  <div class="time">发生时间：2026-09-28 15:54</div>
+  <div class="body">
+    <div class="text">
+      <p><span class="lbl">现象：</span>从主界面点击 PK CONTEST 进入后，THEME 页只显示标题，既没有主题名称也没有 Start 按钮（页面内容为空）。重新进入后恢复正常（主题 Musical Rebellion + Start 按钮）。</p>
+      <p><span class="lbl">推测：</span>疑似页面资源 / 数据尚未加载完成时的中间态或竞态；单次出现，需进一步验证。</p>
+      <p><span class="lbl">证据：</span>仅显示“THEME”标题的空页面。</p>
+    </div>
+    <div class="figs">
+      <figure><a href="https://workbuddy-space-static.codebuddy.work/image/Mg5JwK16AX2X2ZueN4mYZJ.jpg" target="_blank"><img src="https://workbuddy-space-static.codebuddy.work/image/Mg5JwK16AX2X2ZueN4mYZJ.jpg" alt="THEME页空状态"></a><figcaption>15:54</figcaption></figure>
+    </div>
+  </div>
+</div>
+
+<h2>三、测试环境与配置问题（非游戏缺陷）</h2>
+
+<div class="plain"><b>1. 无线 ADB 反复掉线（测试期间中断 4 次以上）</b><br>
+实测报错为 <code>adb server version (40) doesn't match this client (41); killing...</code>——本机同时存在不同版本的 adb 客户端，共用 5037 端口时互相终止服务，导致设备连接频繁断开。统一改用 Android SDK 版 adb 后连接稳定。此为测试环境问题，非游戏缺陷。</div>
+
+<div class="plain"><b>2. 设备分辨率与项目档案标定不一致</b><br>
+本机实测 <b>720 × 1600</b>（density 300）；而项目 YoYa Star 档案此前按 1080 × 2340 标定。因此本次所有点击坐标均按当前设备重新换算，历史坐标不可直接复用。</div>
+
+<div class="plain"><b>3. 图片判读渠道</b><br>
+首个接口密钥鉴权返回 401（Invalid API key）；更换密钥后鉴权通过，但所指定模型的多数名称在该网关上不存在（返回 HTTP 503），最终改用网关上实际存在的视觉模型完成判读。此项属配置问题，非游戏缺陷。</div>
+
+<h2>四、测试覆盖范围</h2>
+
+<table>
+  <thead><tr><th style="width:34%">范围</th><th style="width:14%">状态</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>启动 / 关闭 / 重启</td><td class="ok">已覆盖</td><td>冷启动、force-stop 后重启均正常加载主界面</td></tr>
+    <tr><td>主界面各入口布局</td><td class="ok">已覆盖</td><td>ARS / SHOP / 奖杯 / POSE / NEW / POST / Dress up / LIVE SHOW / PK CONTEST 均可见</td></tr>
+    <tr><td>PK CONTEST 完整链路</td><td class="ok">已覆盖</td><td>THEME → Start → 三选一换装 → PK 演出 → VICTORY 结算，可完整跑通</td></tr>
+    <tr><td>SHOP → Custom Made</td><td class="ok">已覆盖</td><td>三组套装、看广告解锁提示正常显示</td></tr>
+    <tr><td>LIVE SHOW 换装页</td><td class="ok">已覆盖</td><td>发型网格、颜色条、礼物进度条显示正常</td></tr>
+    <tr><td>Dress up 换装编辑页</td><td class="ok">已覆盖</td><td>人物立绘、分类栏、工具按钮显示正常</td></tr>
+    <tr><td>POST / 奖杯成就入口</td><td class="no">未覆盖</td><td>被公告弹窗反复拦截，本次未能进入</td></tr>
+    <tr><td>SHOP 其他分页</td><td class="no">未覆盖</td><td>仅检查了 Custom Made 一页</td></tr>
+    <tr><td>真实付费流程</td><td class="no">未覆盖</td><td>未进行任何真实支付操作</td></tr>
+    <tr><td>长时间运行稳定性</td><td class="no">未覆盖</td><td>本次为约 40 分钟短时巡检</td></tr>
+  </tbody>
+</table>
+
+<footer>
+  测试时间 2026-09-28；设备 Samsung SM-A035F / Android 13 / 720×1600。<br>
+  报告中所有结论均来自真机实测截图，已复现与待复核条目分别标注；未覆盖范围如实列出，不代表已验证通过。
+</footer>
+
+</div>
+</body>
+</html>
