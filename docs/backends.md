@@ -177,4 +177,51 @@ DirectInput 类游戏的标准要求（见 §9.3.3），但对这个游戏不够
 
 ---
 
+## 9.3.4 安卓注入：Android 14 的 INJECT_EVENTS 封锁与 uinput 虚拟触摸屏（2026-10-08 真机验证）
+
+新版安卓上，`internal/android` 那条「shell 调 `input`」的老路已经**整体失效**。实测（Redmi K50 / Android 14 / HyperOS V816，uid=2000 shell，设备无 root、无 `su`）：
+
+| 通道 | 结果 |
+|---|---|
+| `adb shell input tap/swipe/keyevent` | ❌ `java.lang.SecurityException: Injecting input events requires the caller (or the source of the instrumentation, if any) to have the INJECT_EVENTS permission`（栈：`InputManagerService.injectInputEventToTarget` / `InputShellCommand.runKeyEvent` / `sendTap`） |
+| `sendevent /dev/input/eventN …` | ❌ `Permission denied`（SELinux） |
+| `monkey -p <pkg> -f <脚本>` | ❌ 只打印用法，不执行 |
+| `settings put system/global` | ❌ 缺 `WRITE_SETTINGS` / `WRITE_SECURE_SETTINGS` |
+
+**可行通路：`/dev/uinput`。** shell 能打开它（`crw-rw---- system net_bt_admin u:object_r:uhid_device:s0`），且这个 ROM 自己就在用（`getevent -pl` 里能看到 `uinput_nav` / `uinput-goodix`）——由 shell 创建一个虚拟多点触摸屏，内核会把它当作真实触摸设备交给 InputReader，注入走的是**和手指完全相同**的链路（纯模拟输入，不读内存、不碰封包）。
+
+实现分三层，零 CGO：
+
+- `internal/uinject/device`：设备侧守护进程（`GOOS=android GOARCH=arm64 CGO_ENABLED=0` 交叉编译），stdin/stdout 行协议，启动打印 `READY rot=… raw=…`，命令回 `OK <cmd>` / `ERR <reason>`；
+- `internal/uinject`：主机侧（编译 + `adb push` 到 `/data/local/tmp/uinject` + 会话 + 截图）；
+- `cmd/uinject`：CLI（`-tap/-swipe/-down/-move/-up/-key/-script`）。
+
+**五个必须记住的实现细节：**
+
+1. **位图 ioctl 传值不传指针。** `UI_SET_EVBIT/KEYBIT/ABSBIT/PROPBIT` 对应内核的 `uinput_set_bit(arg, …)`，第三个参数是**值本身**；只有 `UI_ABS_SETUP`/`UI_DEV_SETUP` 传结构体指针。传错会得到 `invalid argument`。
+2. **EV_FF 陷阱。** 图省事把 EV 位 `0..EV_MAX` 全开，会带上 `EV_FF`，而 `ff_effects_max=0` 时内核**拒绝创建设备**（`UI_DEV_CREATE 失败: invalid argument`）。只允许开 `EV_SYN(0x00)` / `EV_KEY(0x01)` / `EV_ABS(0x03)`。
+3. **必须声明 `INPUT_PROP_DIRECT`** 并给出 `ABS_MT_SLOT` / `TRACKING_ID` / `POSITION_X` / `POSITION_Y` / `PRESSURE`，才会被认成**内部、与显示关联**的触摸屏（否则坐标不映射到屏幕）。
+4. **注册成功的判据**（`dumpsys input`）：`Sources: TOUCHSCREEN`、`Touch Input Mapper (mode - DIRECT)`、`hasAssociatedDisplay=true, isExternal=false`、`OrientationAware: true`、`X: max=1079.001 / Y: max=2399.000`；`getevent -pl` 里出现 `name: "gs-touch"`、`ABS_MT_POSITION_X max 1080`、`Y max 2400`。事件层用 `getevent -lt /dev/input/eventN` 复核：`ABS_MT_TRACKING_ID 1 → BTN_TOUCH DOWN → POSITION_X/Y → PRESSURE → SYN`，抬起 `TRACKING_ID ffffffff → BTN_TOUCH UP`。
+5. **uinput 不是唤醒源。** `KEY_WAKEUP(143)` / `KEY_POWER(116)` **点不亮屏幕**，休眠状态下注入触摸同样不唤醒（都是实测）。唤醒仍要靠 `svc power stayon true`（每次调用点亮，但不持久；`dumpsys battery unplug` + `set ac 1` 也可）。**每轮动作前先唤醒、并让游戏在前台**，否则注入会被静默丢弃。
+
+**横屏坐标与旋转。** 虚拟设备的原始坐标是**物理竖屏**值（1080×2400），而游戏横屏显示（2400×1080）。`internal/uinject/coord` 负责换算：`Rotate(rot,w,h,rx,ry,x,y)` + `InferRot`（横屏→90，竖屏→0），归一到 `[0,rx]/[0,ry]`。旋转判错会让点按整体镜像——但落点往往仍落在同一块 UI 内，可以改用 `-rot 270` 重试（这是安全的重试，不是赌博）。**横屏角度的权威判据是 `dumpsys SurfaceFlinger`**：`orientedDisplaySpace bounds=Rect(0,0,2400,1080) ROTATION_0` + `framebufferSpace bounds=Rect(0,0,1080,2400) ROTATION_90` 表示内容被转了 90° 写进竖向物理帧。
+
+**用法：**
+
+```bash
+guinject -serial <serial> -install                 # 编译并推送设备侧程序（复用不必重编）
+guinject -serial <serial> -probe                   # 建会话，打印 READY 后退出
+guinject -serial <serial> -rot 90 -tap "1748 240"
+guinject -serial <serial> -rot 90 -swipe "540 2100 540 300 250"
+guinject -serial <serial> -rot 90 -script aim.txt  # 序列脚本
+```
+
+脚本行：`tap X Y [MS]`（默认 60ms）、`swipe X1 Y1 X2 Y2 MS [STEPS]`（steps 默认 ms/16，钳到 2..120）、`down X Y`、`move X Y`、`up`、`key CODE|NAME`、`sleep MS`、`shot <本地路径>`、`# 注释`。
+
+⚠️ 两个坑：**多值动作必须整串引号**（`-tap 1748 240` 只会取到第一个数并报 `tap 需要 2 个参数`，不会注入），否则走 `-script`；`shot` 走主机侧拉图不稳，**抓图仍建议用 `adb shell screencap -p` + `adb pull`**。
+
+> 排查提示：设备侧 `main()` 漏了句柄赋值（`in.f = f`）时，触摸事件写到 nil `*os.File`，报错文本恰好是 `invalid argument`，**与内核 EINVAL 无法区分**。所以怀疑 ioctl 之前，先确认事件句柄真的绑上了。
+
+---
+
 > 分册全目录见 [README §9 文档索引](../README.md#9-文档索引)。
